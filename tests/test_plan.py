@@ -130,3 +130,158 @@ def _message_text(content: Any) -> str:
     if isinstance(content, str):
         return content
     return str(content)
+
+
+def test_plan_execute_runs_dependent_task_after_dependencies_and_injects_results(tmp_path):
+    client = DependentPlanClient()
+    registry = ToolRegistry()
+    registry.register_all(get_builtin_tools())
+    config = load_config(project_root=tmp_path)
+    config.policy.hitl_mode = "never"
+    agent = PlanExecuteAgent(
+        llm_client=client,
+        tool_registry=registry,
+        config=config,
+        cwd=str(tmp_path),
+    )
+
+    async def run():
+        events = []
+        async for event in agent.run("run A and B before C"):
+            if event.get("type") == "error":
+                raise event["error"]
+            events.append(event)
+        return events
+
+    events = asyncio.run(run())
+    text = "".join(str(event.get("text") or "") for event in events)
+    done = events[-1]
+
+    assert client.peak_concurrency == 2
+    assert client.starts[:2] == ["Task A", "Task B"]
+    assert client.starts[-1] == "Task C"
+    assert set(client.completed_before_c) == {"Task A", "Task B"}
+    assert "Result A" in client.task_c_context
+    assert "Result B" in client.task_c_context
+    assert "Completed [task_3]" in text
+    assert "Plan execution completed" in text
+    assert done["total_turns"] == 3
+    assert done["total_tokens"] == 6
+
+
+def test_plan_execute_propagates_worker_failure_without_hiding_successes(tmp_path):
+    client = FailingPlanClient()
+    registry = ToolRegistry()
+    registry.register_all(get_builtin_tools())
+    config = load_config(project_root=tmp_path)
+    config.policy.hitl_mode = "never"
+    agent = PlanExecuteAgent(
+        llm_client=client,
+        tool_registry=registry,
+        config=config,
+        cwd=str(tmp_path),
+    )
+
+    async def run():
+        events = []
+        async for event in agent.run("run one successful and one failing task"):
+            events.append(event)
+        return events
+
+    events = asyncio.run(run())
+    text = "".join(str(event.get("text") or "") for event in events)
+    done = events[-1]
+
+    assert not any(event.get("type") == "error" for event in events)
+    assert "Failed [task_1]: worker boom" in text
+    assert "Completed [task_2]: Stable result" in text
+    assert "Plan partially completed with failed tasks" in text
+    assert done["total_turns"] == 1
+    assert done["total_tokens"] == 2
+
+
+class DependentPlanClient(FakeClient):
+    def __init__(self):
+        self.current_concurrency = 0
+        self.peak_concurrency = 0
+        self.ready = asyncio.Event()
+        self.finished: list[str] = []
+        self.starts: list[str] = []
+        self.completed_before_c: list[str] = []
+        self.task_c_context = ""
+
+    async def chat(self, messages, tools, *, system_prompt):  # noqa: ARG002
+        body = _message_text(messages[-1].content)
+        if "Please create an execution plan" in body:
+            yield {
+                "type": "text_delta",
+                "text": (
+                    '{"summary":"dependent","tasks":['
+                    '{"id":"a","description":"Task A","type":"ANALYSIS","dependencies":[]},'
+                    '{"id":"b","description":"Task B","type":"ANALYSIS","dependencies":[]},'
+                    '{"id":"c","description":"Task C","type":"ANALYSIS","dependencies":["a","b"]}'
+                    "]}"
+                ),
+            }
+            yield {"type": "message_end", "stop_reason": "end_turn"}
+            return
+
+        if "Task A" in body and "Current task [task_1]" in body:
+            async for event in self._parallel_task("Task A", "Result A"):
+                yield event
+            return
+        if "Task B" in body and "Current task [task_2]" in body:
+            async for event in self._parallel_task("Task B", "Result B"):
+                yield event
+            return
+        if "Current task [task_3]" in body:
+            self.starts.append("Task C")
+            self.completed_before_c = list(self.finished)
+            self.task_c_context = body
+            yield {"type": "text_delta", "text": "Result C"}
+            yield {"type": "usage", "usage": {"input_tokens": 1, "output_tokens": 1}}
+            yield {"type": "message_end", "stop_reason": "end_turn"}
+            return
+
+        yield {"type": "text_delta", "text": "fallback"}
+        yield {"type": "message_end", "stop_reason": "end_turn"}
+
+    async def _parallel_task(self, name: str, result: str):
+        self.starts.append(name)
+        self.current_concurrency += 1
+        self.peak_concurrency = max(self.peak_concurrency, self.current_concurrency)
+        if self.current_concurrency == 2:
+            self.ready.set()
+        await asyncio.wait_for(self.ready.wait(), timeout=2)
+        self.current_concurrency -= 1
+        self.finished.append(name)
+        yield {"type": "text_delta", "text": result}
+        yield {"type": "usage", "usage": {"input_tokens": 1, "output_tokens": 1}}
+        yield {"type": "message_end", "stop_reason": "end_turn"}
+
+
+class FailingPlanClient(FakeClient):
+    async def chat(self, messages, tools, *, system_prompt):  # noqa: ARG002
+        body = _message_text(messages[-1].content)
+        if "Please create an execution plan" in body:
+            yield {
+                "type": "text_delta",
+                "text": (
+                    '{"summary":"failure","tasks":['
+                    '{"id":"a","description":"Failing task","type":"ANALYSIS","dependencies":[]},'
+                    '{"id":"b","description":"Successful task","type":"ANALYSIS","dependencies":[]}'
+                    "]}"
+                ),
+            }
+            yield {"type": "message_end", "stop_reason": "end_turn"}
+            return
+        if "Failing task" in body:
+            yield {"type": "error", "error": RuntimeError("worker boom")}
+            return
+        if "Successful task" in body:
+            yield {"type": "text_delta", "text": "Stable result"}
+            yield {"type": "usage", "usage": {"input_tokens": 1, "output_tokens": 1}}
+            yield {"type": "message_end", "stop_reason": "end_turn"}
+            return
+        yield {"type": "text_delta", "text": "fallback"}
+        yield {"type": "message_end", "stop_reason": "end_turn"}

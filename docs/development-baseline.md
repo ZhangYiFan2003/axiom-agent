@@ -42,11 +42,11 @@ stage. This document does not repeat the model request.
 | Memory | `src/axiom/memory/manager.py` | Verified | `tests/test_memory.py` verifies write, read, persistence across manager instances, search, clear, and project scope isolation with a temporary SQLite database. |
 | Skills | `src/axiom/skill/registry.py`, `src/axiom/tools/builtins.py` | Verified | Skill registry, skill context buffer, and `load_skill` context behavior tests passed. |
 | Snapshots | `src/axiom/snapshot/service.py` | Verified | `tests/test_snapshot.py` verifies snapshot creation, restore, listing, cleanup, and ignored cache directory behavior under an isolated temporary home. |
-| Plan-execute | `src/axiom/agent/plan_execute.py`, `src/axiom/plan/*` | Partially verified | Plan model and planner parsing tests passed. PlanExecuteAgent execution test failed before execution due snapshot initialization permission error. |
-| Multi-agent | `src/axiom/agent/orchestrator.py` | Partially verified | Parsing/review behavior tests passed. Parallel worker execution test failed before execution due snapshot initialization permission error. |
+| Plan-execute | `src/axiom/agent/plan_execute.py`, `src/axiom/plan/*` | Verified | `tests/test_plan.py` verifies plan parsing, dependency ordering, independent task parallelism, dependency result injection, worker failure propagation, final aggregation text, and usage/turn accounting with fake LLM clients. |
+| Multi-agent | `src/axiom/agent/orchestrator.py` | Verified | `tests/test_multi_agent.py` verifies plan parsing, independent worker parallelism, dependent worker ordering, result collection, reviewer reject-then-approve retry, and worker failure summaries with fake LLM clients. |
 | MCP client | `src/axiom/mcp/client.py`, `src/axiom/mcp/config.py` | Verified | Tests passed for stdio MCP tool discovery/call and stderr suppression. |
-| MCP server | `src/axiom/mcp/server.py` | Partially verified | JSON-RPC tools/list handler is covered by tests. Long-running stdio/http server processes were not started in this baseline. |
-| Runtime API | `src/axiom/runtime/api.py`, `src/axiom/runtime/tasks.py` | Partially verified | Durable task lifecycle and cancel tests passed. HTTP Runtime API server was not started in this baseline. |
+| MCP server | `src/axiom/mcp/server.py` | Partially verified | Handler-level tests cover initialize, tools/list, safe tools/call, unknown tools, unknown methods, and malformed missing-method requests. Long-running stdio/http transports were not started in this baseline. |
+| Runtime API | `src/axiom/runtime/api.py`, `src/axiom/runtime/tasks.py` | Partially verified | Durable task tests and direct handler tests cover authorization, task create/get/complete/cancel, unknown IDs, malformed JSON, missing fields, and unsupported routes. Live HTTP serving and LLM-backed thread turns were not started in this baseline. |
 
 Status definitions:
 
@@ -74,7 +74,7 @@ secrets and external services unless explicitly noted.
 | Plan-execute | Run existing `tests/test_plan.py` | None expected | Temp files plus snapshot state |
 | Multi-agent | Run existing `tests/test_multi_agent.py` | None expected | Temp files plus snapshot state |
 | MCP client/server handler | Run existing `tests/test_mcp.py` | None expected | Temp MCP server files |
-| Runtime task store | Run existing `tests/test_runtime.py` | None expected | Temp SQLite file |
+| Runtime task/API handler | Run existing `tests/test_runtime.py` | None expected | Temp SQLite files under isolated home |
 
 ## 4. Test baseline
 
@@ -109,10 +109,10 @@ uv run pytest
 
 Result:
 
-- Passed: 35
+- Passed: 45
 - Failed: 0
 - Skipped: 0
-- Total executed: 35
+- Total executed: 45
 
 The pytest baseline is currently green after test home-directory isolation was
 added for Windows.
@@ -122,7 +122,7 @@ added for Windows.
 - The one-shot prompt path can call a paid provider when API configuration is
   present. It should not be included in default local test runs.
 - REPL behavior is not covered by the current automated baseline.
-- Runtime API HTTP behavior is not covered by the current automated baseline.
+- Runtime API live HTTP serving and LLM-backed thread turns are not covered by the current automated baseline.
 - MCP long-running stdio/http server behavior is only partially covered through
   request handler and client tests.
 - Broader end-to-end coverage for every built-in tool is still incomplete.
@@ -130,6 +130,7 @@ added for Windows.
 ## 6. Recommended next-stage tasks
 
 1. Add broader no-network tests for high-risk built-in tools beyond the current read/write and ReAct `read_file` path.
-2. Add a minimal Runtime API HTTP test that binds localhost on an ephemeral port or directly exercises request handling without external services.
-3. Add a REPL smoke test for slash command dispatch without launching a fully interactive terminal.
-4. Keep paid model verification as an explicit manual smoke command, never as a default automated test.
+2. Add a Runtime API live HTTP smoke test on localhost with an ephemeral port, if server lifecycle hooks are made test-friendly.
+3. Add MCP stdio/http transport lifecycle tests with deterministic process cleanup.
+4. Add a REPL smoke test for slash command dispatch without launching a fully interactive terminal.
+5. Keep paid model verification as an explicit manual smoke command, never as a default automated test.

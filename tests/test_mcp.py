@@ -183,6 +183,6 @@ def test_mcp_server_reports_unknown_tool_and_method_with_json_rpc_error(tmp_path
         assert "error" in response
         assert isinstance(response["error"]["message"], str)
 
-    assert 'Tool "missing_tool" not found' == unknown_tool["error"]["message"]
-    assert "Unknown method: missing/method" == unknown_method["error"]["message"]
-    assert "Unknown method: None" == missing_method["error"]["message"]
+    assert unknown_tool["error"]["message"] == 'Tool "missing_tool" not found'
+    assert unknown_method["error"]["message"] == "Unknown method: missing/method"
+    assert missing_method["error"]["message"] == "Unknown method: None"

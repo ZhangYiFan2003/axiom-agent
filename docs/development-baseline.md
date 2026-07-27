@@ -7,7 +7,7 @@ values.
 
 ## 1. Current runtime environment
 
-- Project path: `D:\Code\axiom-agent`
+- Project path: `<repository-root>`
 - OS: Windows NT 10.0.22621.0
 - Python in project environment: 3.12.13
 - uv: 0.11.21

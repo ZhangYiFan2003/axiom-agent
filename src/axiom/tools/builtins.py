@@ -193,7 +193,10 @@ def get_builtin_tools() -> list[Tool]:
         ),
         Tool(
             name="load_skill",
-            description="Load a named Axiom Agent Runtime skill manual from user/project skill directories.",
+            description=(
+                "Load a named Axiom Agent Runtime skill manual from user/project "
+                "skill directories."
+            ),
             parameters=object_schema(
                 {"name": {"type": "string", "description": "Skill name"}},
                 ["name"],
@@ -216,7 +219,10 @@ def get_builtin_tools() -> list[Tool]:
         ),
         Tool(
             name="revert_turn",
-            description="Restore the workspace to a previous Axiom Agent Runtime side-history snapshot.",
+            description=(
+                "Restore the workspace to a previous Axiom Agent Runtime "
+                "side-history snapshot."
+            ),
             parameters=object_schema(
                 {"snapshot": {"type": "string", "description": "Snapshot id or 1-based index"}},
                 ["snapshot"],

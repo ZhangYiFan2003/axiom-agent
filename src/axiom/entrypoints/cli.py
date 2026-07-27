@@ -23,7 +23,7 @@ from axiom.runtime.api import runtime_api_key
 
 app = typer.Typer(
     name="axiom",
-    help="Axiom Agent Runtime — Terminal AI Agent in Python",
+    help="Axiom Agent Runtime - Terminal AI Agent in Python",
     invoke_without_command=True,
     no_args_is_help=False,
 )

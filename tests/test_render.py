@@ -60,7 +60,7 @@ def test_prompt_message_keeps_status_and_input_together():
 
 def test_bottom_toolbar_uses_runtime_summary_segments():
     toolbar = _bottom_toolbar(
-        "/Users/me/project",
+        "<repository-root>",
         "deepseek-v4-flash",
         {"turns": 1, "total_tokens": 13187, "context_ratio": 0.013, "has_usage": True},
     )
@@ -68,7 +68,7 @@ def test_bottom_toolbar_uses_runtime_summary_segments():
     assert ("class:toolbar.model", "deepseek-v4-flash") in toolbar
     assert ("class:toolbar.ctx.bar", "█░░░░░░░░░░░") in toolbar
     assert ("class:toolbar.ctx.value", "1%") in toolbar
-    assert ("class:toolbar.cwd.value", "/Users/me/project") in toolbar
+    assert ("class:toolbar.cwd.value", "<repository-root>") in toolbar
     assert not any(text == " TURN " for _style, text in toolbar)
     assert not any("Token" in text for _style, text in toolbar)
 

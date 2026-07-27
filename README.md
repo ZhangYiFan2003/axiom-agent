@@ -1,81 +1,91 @@
 # Axiom Agent Runtime
 
-Axiom Agent Runtime is a lightweight Python terminal AI agent runtime. It combines a CLI, ReAct-style tool use, MCP integration, memory, skills, snapshots, multi-agent orchestration, and a local Runtime API into one small project that is easy to study, run, and extend.
+[![CI](https://github.com/ZhangYiFan2003/axiom-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/ZhangYiFan2003/axiom-agent/actions/workflows/ci.yml)
 
-The project is intentionally practical rather than demo-only: it can run as an interactive assistant, execute one-shot prompts, call local tools, connect to MCP servers, and expose runtime primitives for external systems.
+A modular Python runtime and CLI for building tool-using AI agents.
+
+Axiom Agent Runtime provides a small but complete foundation for experimenting with terminal agents: a CLI, one-shot prompts, a ReAct loop, tool execution, memory, snapshots, skills, MCP integration, Plan-and-Execute, multi-agent orchestration, and a lightweight Runtime API. The current baseline is designed to be testable without real model calls, external MCP servers, secrets, or user-directory writes.
+
+## Overview
+
+Axiom is organized around a few core paths:
+
+- `axiom` CLI for help, diagnostics, one-shot prompts, REPL entry, MCP helpers, and Runtime API startup.
+- `QueryEngine` as the main facade for ReAct, plan execution, and multi-agent flows.
+- OpenAI-compatible LLM client abstraction for real provider calls when configured.
+- Tool registry and executor for model-requested local tool calls.
+- Memory, snapshots, skills, MCP, and Runtime API modules for runtime state and integrations.
+
+The core Agent Runtime paths are covered by offline tests with fake LLM clients. Some integration surfaces, such as MCP server transport lifecycle and live Runtime API serving, are intentionally marked as partially verified until they have stable end-to-end transport tests.
 
 ## Features
 
-- Terminal CLI powered by Typer, Rich, and prompt-toolkit
-- One-shot prompt mode and interactive REPL
-- OpenAI-compatible streaming chat completions
-- Default DeepSeek-compatible provider configuration
-- ReAct agent loop with tool execution
-- Built-in workspace, shell, web, memory, skill, code search, and snapshot tools
-- Human-in-the-loop command approval policy
-- Project and long-term memory support
-- Skill discovery through `SKILL.md` files
-- MCP client support for stdio and Streamable HTTP servers
-- MCP server mode for exposing built-in tools
-- Plan-and-execute workflow
-- Multi-agent planner, worker, and reviewer orchestration
-- Local Runtime API for threads, turns, events, and background tasks
-- Image input preprocessing for multimodal-capable providers
+| Feature | Description | Verification |
+| --- | --- | --- |
+| CLI command | Typer-based `axiom` command with help, diagnostics, prompt mode, MCP helpers, and Runtime API commands. | Tested |
+| One-shot prompt | Runs a single prompt through the configured provider and renderer. | Manual smoke tested |
+| ReAct Agent | Executes the loop from model response to tool call, observation, and final answer. | Tested |
+| Tool Calling | Merges streamed tool-call deltas, executes registered tools, and replays tool results to the model. | Tested |
+| Built-in Tools | Includes file, shell, search, memory, skill, web, code search, and snapshot tools. | Partially tested |
+| Memory | Stores, reads, searches, clears, and isolates scoped long-term memory in SQLite. | Tested |
+| Snapshots | Creates, restores, lists, and cleans workspace snapshots under an isolated home in tests. | Tested |
+| Skills | Loads built-in, user, and project `SKILL.md` files and supports skill context injection. | Tested |
+| Plan-Execute | Parses task DAGs, runs independent tasks in parallel, respects dependencies, and aggregates results. | Tested |
+| Multi-Agent | Coordinates planner, worker, and reviewer roles, including retries and worker failure summaries. | Tested |
+| MCP Client | Discovers and calls tools from local stdio MCP servers in tests. | Tested |
+| MCP Server | Exposes built-in tools through handler-level JSON-RPC requests. | Handler tested |
+| Runtime API | Provides task and thread-oriented runtime endpoints; task handler paths are covered. | Handler tested |
+| Streaming | Parses OpenAI-compatible streaming events and renders incremental output. | Partially tested |
+| REPL | Interactive prompt-toolkit entrypoint and slash commands. | Not fully verified |
 
 ## Architecture
 
 ```mermaid
 flowchart TD
-    CLI["axiom CLI"] --> Config["Configuration loader"]
-    Config --> LLM["LLM provider factory"]
-    Config --> Tools["Tool registry"]
-    Tools --> Builtins["Built-in tools"]
-    Tools --> MCP["MCP client tools"]
-    LLM --> Client["OpenAI-compatible client"]
-    CLI --> Engine["QueryEngine"]
-    Engine --> Agent["ReAct / plan / multi-agent flows"]
-    Agent --> Prompt["Prompt assembler"]
-    Agent --> Client
-    Agent --> Tools
-    Client --> Renderer["Terminal renderer"]
-    Tools --> Memory["Memory and snapshots"]
-    CLI --> Runtime["Runtime API"]
+    A["CLI / Runtime API"] --> B["QueryEngine"]
+    B --> C["Agent Runtime"]
+    C --> D["LLM Client"]
+    C --> E["Tool Registry"]
+    D <--> E
+    E --> F["Memory"]
+    E --> G["Snapshots"]
+    E --> H["Skills"]
+    E --> I["MCP"]
 ```
 
-Core modules:
+Key modules:
 
-- `src/axiom/entrypoints/cli.py`: CLI app, commands, one-shot prompt mode, doctor, MCP, and Runtime API commands
-- `src/axiom/entrypoints/repl.py`: interactive REPL and slash commands
-- `src/axiom/config.py`: layered configuration loading
-- `src/axiom/llm/`: LLM abstraction and OpenAI-compatible client
-- `src/axiom/agent/`: query loop, plan-execute, and multi-agent orchestration
-- `src/axiom/tools/`: tool model, registry, executor, and built-in tools
-- `src/axiom/mcp/`: MCP client, MCP config, and MCP server support
-- `src/axiom/memory/`: long-term memory persistence
-- `src/axiom/snapshot/`: workspace snapshot service
-- `src/axiom/runtime/`: local Runtime API
+- `src/axiom/entrypoints/cli.py`: CLI app, commands, prompt mode, diagnostics, MCP, and Runtime API commands.
+- `src/axiom/entrypoints/repl.py`: interactive REPL and slash command handling.
+- `src/axiom/config.py`: layered configuration loading.
+- `src/axiom/llm/`: LLM protocol, provider factory, and OpenAI-compatible client.
+- `src/axiom/agent/`: ReAct query loop, Plan-and-Execute, and multi-agent orchestration.
+- `src/axiom/tools/`: tool model, registry, executor, and built-in tools.
+- `src/axiom/mcp/`: MCP client, MCP config, and MCP server handler support.
+- `src/axiom/memory/`: scoped long-term memory persistence.
+- `src/axiom/snapshot/`: workspace snapshot service.
+- `src/axiom/runtime/`: local Runtime API and durable task store.
 
-More detail is available in [`docs/architecture-current.md`](docs/architecture-current.md).
+See [`docs/architecture-current.md`](docs/architecture-current.md) for the detailed architecture baseline.
 
 ## Requirements
 
-- Python 3.11 or newer
-- uv
-- A compatible LLM API key for model requests
+- Python `>=3.11`
+- `uv`
+- A compatible model provider for real LLM requests
+- An API key only when running real model calls
 
-The CLI can show help and run local diagnostics without making a model request.
+Help, diagnostics, and the default test suite do not require a model provider API key.
 
 ## Installation
-
-Clone the repository and install dependencies with uv:
 
 ```bash
 git clone https://github.com/ZhangYiFan2003/axiom-agent.git
 cd axiom-agent
-uv sync --extra dev
+uv sync --extra dev --locked
 ```
 
-Verify the CLI:
+Verify the CLI without a model request:
 
 ```bash
 uv run axiom --help
@@ -84,29 +94,24 @@ uv run axiom doctor --cwd .
 
 ## Configuration
 
-Axiom loads configuration from defaults, user/project config files, `.env`, process environment variables, and CLI overrides. Do not commit local configuration or credentials.
+For real model requests, configure a provider and API key through environment variables or local ignored configuration.
 
-Common environment variables:
-
-```bash
+```env
+DEEPSEEK_API_KEY=your-api-key
 AXIOM_PROVIDER=deepseek
 AXIOM_MODEL=deepseek-v4-flash
-DEEPSEEK_API_KEY=your_key_here
 ```
 
-You can also use the generic key name:
-
-```bash
-AXIOM_API_KEY=your_key_here
-```
-
-Local configuration and state should stay outside Git:
+Do not commit secrets or local state. The repository ignores common sensitive and local files, including:
 
 - `.env`
 - `.env.*`
 - `.axiom/`
 - `.venv/`
 - `.uv-cache/`
+- private keys, token files, and credential files
+
+Never paste API keys into issues, logs, prompts, or generated documents.
 
 ## Usage
 
@@ -116,17 +121,19 @@ Show help:
 uv run axiom --help
 ```
 
+Run diagnostics without a model request:
+
+```bash
+uv run axiom doctor --cwd .
+```
+
 Run a one-shot prompt:
 
 ```bash
-uv run axiom -p "Reply with OK"
+uv run axiom --plain -p "Reply with OK"
 ```
 
-Use plain output mode:
-
-```bash
-uv run axiom --plain -p "Summarize this project"
-```
+The one-shot prompt uses the configured provider. It can call an external API and may incur provider costs.
 
 Start the interactive CLI:
 
@@ -134,30 +141,61 @@ Start the interactive CLI:
 uv run axiom
 ```
 
-Run diagnostics:
+Runtime API and MCP helpers are available from the CLI, but their live transport lifecycle is still treated as partially verified in the current baseline:
 
 ```bash
-uv run axiom doctor --cwd .
-```
-
-Start the local Runtime API:
-
-```bash
-AXIOM_RUNTIME_API_KEY=dev-key uv run axiom serve --host 127.0.0.1 --port 8765
-```
-
-Manage MCP helpers:
-
-```bash
+uv run axiom serve --help
 uv run axiom mcp --help
 ```
 
-## Development
+## Testing
 
-Install development dependencies:
+Run the full local test suite:
 
 ```bash
-uv sync --extra dev
+uv run pytest
+```
+
+Current baseline:
+
+```text
+45 tests passing
+```
+
+The default tests use fake LLM clients, temporary directories, temporary SQLite databases, and localhost-safe handler paths. They do not require API keys and do not call external model providers.
+
+GitHub Actions runs the same test suite on push and pull request events for `main`.
+
+## Project Status
+
+Verified in the current baseline:
+
+- ReAct loop
+- Tool calling
+- Memory
+- Snapshots
+- Skills
+- Plan-and-Execute
+- Multi-agent orchestration
+- MCP client stdio discovery/call path
+- Runtime task store and direct API handler paths
+
+Partially verified or intentionally bounded:
+
+- MCP server long-running stdio/http transport lifecycle remains partially verified.
+- Runtime API live HTTP server and LLM-backed thread turns remain partially verified.
+- Interactive REPL behavior is less extensively covered than non-interactive paths.
+- Real provider streaming has manual smoke coverage plus unit-level streaming/rendering paths, but not exhaustive provider matrix coverage.
+- Not every built-in tool has a full end-to-end test.
+
+See [`docs/development-baseline.md`](docs/development-baseline.md) for the feature matrix and verification notes.
+
+## Development
+
+Install dependencies:
+
+```bash
+uv sync --extra dev --locked
 ```
 
 Run tests:
@@ -182,38 +220,33 @@ uv run ruff format .
 
 ```text
 .
-├── docs/                  Architecture and development notes
-├── src/axiom/             Python package
-│   ├── agent/             ReAct, plan-execute, and multi-agent flows
-│   ├── entrypoints/       CLI and REPL entrypoints
-│   ├── llm/               LLM provider abstraction
-│   ├── mcp/               MCP client and server integration
-│   ├── memory/            Long-term memory
-│   ├── runtime/           Local Runtime API
-│   ├── snapshot/          Workspace snapshots
-│   └── tools/             Tool registry and built-in tools
-├── tests/                 Pytest test suite
-├── pyproject.toml         Package metadata and tool config
-└── uv.lock                Locked dependency graph
+├── .github/workflows/ci.yml
+├── docs/
+├── src/axiom/
+│   ├── agent/
+│   ├── entrypoints/
+│   ├── llm/
+│   ├── mcp/
+│   ├── memory/
+│   ├── runtime/
+│   ├── snapshot/
+│   └── tools/
+├── tests/
+├── pyproject.toml
+└── uv.lock
 ```
-
-## Security Notes
-
-Axiom can execute tools and shell commands when configured to do so. Review commands before approving them, keep credentials out of the repository, and avoid storing secrets in prompts, logs, or generated documents.
-
-The repository ignores common local and sensitive files, including `.env`, `.env.*`, `.axiom/`, `.venv/`, `.uv-cache/`, private keys, token files, and credential files.
 
 ## Roadmap
 
-Near-term engineering work:
+Near-term directions:
 
-- GitHub Actions CI for tests
-- README and documentation polish for public users
-- First tagged release: `v0.1.0`
-- Provider adapters for OpenAI, Anthropic Claude, Ollama, and other local models
-- RAG tools for document loading, embedding, retrieval, and agent use
-- Runtime API hardening for auth, sessions, and observability
-- Docker packaging and deployment examples
+- Provider adapter improvements
+- Richer MCP transport lifecycle verification
+- Runtime API integration testing
+- Retrieval and RAG tool support
+- Observability for agent runs, tools, and runtime events
+
+No dates are promised; the roadmap is intentionally small so the current verified baseline remains stable.
 
 ## License
 

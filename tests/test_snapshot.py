@@ -18,3 +18,23 @@ def test_snapshot_restore(tmp_path, monkeypatch):
 
     assert restored.id == first.id
     assert file_path.read_text(encoding="utf-8") == "before"
+
+def test_snapshot_create_list_and_clean(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "note.txt").write_text("saved", encoding="utf-8")
+    pycache = project / "__pycache__"
+    pycache.mkdir()
+    (pycache / "ignored.pyc").write_bytes(b"cache")
+
+    service = SnapshotService(project)
+    pre = service.create("pre-turn")
+    post = service.create("post-turn")
+
+    records = service.list()
+
+    assert [record.id for record in records] == [post.id, pre.id]
+    assert (pre.path / "note.txt").read_text(encoding="utf-8") == "saved"
+    assert not (pre.path / "__pycache__").exists()
+    assert service.clean() == 2
+    assert service.list() == []

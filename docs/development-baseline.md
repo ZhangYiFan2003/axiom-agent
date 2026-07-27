@@ -36,12 +36,12 @@ stage. This document does not repeat the model request.
 | REPL | `src/axiom/entrypoints/repl.py` | Not verified | Interactive REPL was not started in this baseline stage. |
 | One-shot prompt | `src/axiom/entrypoints/cli.py`, `src/axiom/agent/query_engine.py` | Verified | Minimal AI request was reported successful before this stage with `uv run axiom --plain -p "Reply with OK"`. |
 | Streaming | `src/axiom/llm/openai_compatible.py`, `src/axiom/render/rich_renderer.py` | Partially verified | One-shot prompt uses the streaming client path; renderer streaming behavior has unit coverage. Raw chunk-level live provider behavior was not separately inspected. |
-| Tool calling | `src/axiom/agent/query.py`, `src/axiom/tools/executor.py` | Partially verified | Built-in tools have standalone tests. The full QueryEngine tool replay test failed before tool execution because snapshot initialization hit a permission error. |
+| Tool calling | `src/axiom/agent/query.py`, `src/axiom/tools/executor.py` | Verified | Fake LLM tests verify tool-call delta merge, built-in `read_file` execution, tool result emission, observation replay into the second LLM turn, and final response completion. |
 | Built-in tools | `src/axiom/tools/builtins.py`, `src/axiom/tools/registry.py` | Partially verified | Tool registry and read/write tool tests passed. Not every built-in tool was exercised end to end. |
-| ReAct loop | `src/axiom/agent/query.py`, `src/axiom/agent/agent.py` | Partially verified | One-shot prompt verifies the no-tool path through the agent stack. Tool replay test is currently blocked by snapshot initialization failure. |
-| Memory | `src/axiom/memory/manager.py` | Not verified | No dedicated memory persistence test was run or found in the current pytest baseline. |
+| ReAct loop | `src/axiom/agent/query.py`, `src/axiom/agent/agent.py` | Verified | `tests/test_query.py` uses a Fake LLM to exercise Agent -> LLM response -> tool call -> tool execution -> observation -> final answer without external API calls. |
+| Memory | `src/axiom/memory/manager.py` | Verified | `tests/test_memory.py` verifies write, read, persistence across manager instances, search, clear, and project scope isolation with a temporary SQLite database. |
 | Skills | `src/axiom/skill/registry.py`, `src/axiom/tools/builtins.py` | Verified | Skill registry, skill context buffer, and `load_skill` context behavior tests passed. |
-| Snapshots | `src/axiom/snapshot/service.py` | Partially verified | Agent one-shot did not fail, but dedicated snapshot restore test failed due permission error when creating user-level snapshot state. |
+| Snapshots | `src/axiom/snapshot/service.py` | Verified | `tests/test_snapshot.py` verifies snapshot creation, restore, listing, cleanup, and ignored cache directory behavior under an isolated temporary home. |
 | Plan-execute | `src/axiom/agent/plan_execute.py`, `src/axiom/plan/*` | Partially verified | Plan model and planner parsing tests passed. PlanExecuteAgent execution test failed before execution due snapshot initialization permission error. |
 | Multi-agent | `src/axiom/agent/orchestrator.py` | Partially verified | Parsing/review behavior tests passed. Parallel worker execution test failed before execution due snapshot initialization permission error. |
 | MCP client | `src/axiom/mcp/client.py`, `src/axiom/mcp/config.py` | Verified | Tests passed for stdio MCP tool discovery/call and stderr suppression. |
@@ -90,6 +90,7 @@ Test files:
 - `tests/test_image.py`
 - `tests/test_lsp.py`
 - `tests/test_mcp.py`
+- `tests/test_memory.py`
 - `tests/test_multi_agent.py`
 - `tests/test_plan.py`
 - `tests/test_policy.py`
@@ -108,10 +109,10 @@ uv run pytest
 
 Result:
 
-- Passed: 32
+- Passed: 35
 - Failed: 0
 - Skipped: 0
-- Total executed: 32
+- Total executed: 35
 
 The pytest baseline is currently green after test home-directory isolation was
 added for Windows.
@@ -124,18 +125,11 @@ added for Windows.
 - Runtime API HTTP behavior is not covered by the current automated baseline.
 - MCP long-running stdio/http server behavior is only partially covered through
   request handler and client tests.
-- Memory persistence does not have a dedicated baseline test in the current
-  run.
+- Broader end-to-end coverage for every built-in tool is still incomplete.
 
 ## 6. Recommended next-stage tasks
 
-1. Add or adjust tests for memory persistence so memory can move from Not
-   verified to Verified.
-2. Add a no-network, no-provider test for the no-tool ReAct loop using a fake
-   LLM client and a snapshot-safe home path.
-3. Add a minimal Runtime API HTTP test that binds localhost on an ephemeral port
-   or directly exercises request handling without external services.
-4. Add a REPL smoke test for slash command dispatch without launching a fully
-   interactive terminal.
-5. Keep paid model verification as an explicit manual smoke command, never as a
-   default automated test.
+1. Add broader no-network tests for high-risk built-in tools beyond the current read/write and ReAct `read_file` path.
+2. Add a minimal Runtime API HTTP test that binds localhost on an ephemeral port or directly exercises request handling without external services.
+3. Add a REPL smoke test for slash command dispatch without launching a fully interactive terminal.
+4. Keep paid model verification as an explicit manual smoke command, never as a default automated test.

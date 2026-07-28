@@ -4,6 +4,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 
 @dataclass(slots=True)
@@ -142,4 +143,4 @@ def _now() -> str:
 
 
 def _new_id(prefix: str) -> str:
-    return f"{prefix}_{datetime.now(UTC).strftime('%Y%m%d%H%M%S%f')}"
+    return f"{prefix}_{uuid4().hex}"

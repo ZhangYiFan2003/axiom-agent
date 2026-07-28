@@ -2,11 +2,58 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
 
 from axiom.config import load_config
 from axiom.mcp import McpClientManager
 from axiom.mcp.server import _handle_request
 from axiom.tools.base import ToolContext
+
+ROOT = Path(__file__).resolve().parents[1]
+FAKE_MCP_SERVER = ROOT / "tests" / "fixtures" / "fake_mcp_server.py"
+
+
+def _test_env() -> dict[str, str]:
+    pythonpath = os.pathsep.join(
+        part for part in [str(ROOT / "src"), os.environ.get("PYTHONPATH", "")] if part
+    )
+    return {
+        "PYTHONUNBUFFERED": "1",
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONPATH": pythonpath,
+    }
+
+
+def _write_mcp_config(tmp_path: Path, server_name: str, spec: dict[str, object]) -> None:
+    config_dir = tmp_path / ".axiom"
+    config_dir.mkdir()
+    (config_dir / "mcp.json").write_text(
+        json.dumps({"mcpServers": {server_name: spec}}),
+        encoding="utf-8",
+    )
+
+
+def _free_local_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _wait_for_lines(path: Path, count: int = 1, timeout: float = 10.0) -> list[str]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists():
+            lines = path.read_text(encoding="utf-8").splitlines()
+            if len(lines) >= count:
+                return lines
+        time.sleep(0.05)
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    raise AssertionError(f"Timed out waiting for {count} lines in {path}; got {lines!r}")
 
 
 def test_mcp_tools_list(tmp_path, monkeypatch):
@@ -26,100 +73,144 @@ def test_mcp_tools_list(tmp_path, monkeypatch):
 
 def test_mcp_client_registers_and_calls_stdio_tool(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    server = tmp_path / "fake_mcp_server.py"
-    server.write_text(
-        """
-from mcp.server.fastmcp import FastMCP
-
-mcp = FastMCP("fake")
-
-@mcp.tool()
-def echo(text: str) -> str:
-    return "echo:" + text
-
-if __name__ == "__main__":
-    mcp.run(transport="stdio")
-""".lstrip(),
-        encoding="utf-8",
-    )
-    (tmp_path / ".axiom").mkdir()
-    (tmp_path / ".axiom" / "mcp.json").write_text(
-        json.dumps(
-            {
-                "mcpServers": {
-                    "fake": {
-                        "type": "stdio",
-                        "command": "python",
-                        "args": [str(server)],
-                    }
-                }
-            }
-        ),
-        encoding="utf-8",
+    exit_file = tmp_path / "stdio-exit.log"
+    _write_mcp_config(
+        tmp_path,
+        "fake",
+        {
+            "type": "stdio",
+            "command": sys.executable,
+            "args": [
+                "-u",
+                str(FAKE_MCP_SERVER),
+                "--transport",
+                "stdio",
+                "--exit-file",
+                str(exit_file),
+            ],
+            "cwd": str(tmp_path),
+            "env": _test_env(),
+            "timeout": 10,
+        },
     )
 
     async def run():
         manager = McpClientManager(tmp_path)
-        tools = await manager.load_tools()
+        tools = await asyncio.wait_for(manager.load_tools(), timeout=10)
         names = [tool.name for tool in tools]
         tool = next(item for item in tools if item.name == "mcp__fake__echo")
         config = load_config(project_root=tmp_path)
         config.policy.hitl_mode = "never"
-        result = await tool.execute({"text": "ok"}, ToolContext(cwd=str(tmp_path), config=config))
+        result = await asyncio.wait_for(
+            tool.execute({"text": "ok"}, ToolContext(cwd=str(tmp_path), config=config)),
+            timeout=10,
+        )
         return names, result
 
     names, result = asyncio.run(run())
     assert "mcp__fake__echo" in names
     assert result.content == "echo:ok"
+    _wait_for_lines(exit_file, count=2)
 
 
 def test_mcp_client_suppresses_stdio_server_stderr(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    server = tmp_path / "noisy_mcp_server.py"
-    server.write_text(
-        """
-import sys
-from mcp.server.fastmcp import FastMCP
-
-sys.stderr.write("NOISY_MCP_STARTUP\\n")
-sys.stderr.flush()
-
-mcp = FastMCP("noisy")
-
-@mcp.tool()
-def echo(text: str) -> str:
-    return text
-
-if __name__ == "__main__":
-    mcp.run(transport="stdio")
-""".lstrip(),
-        encoding="utf-8",
-    )
-    (tmp_path / ".axiom").mkdir()
-    (tmp_path / ".axiom" / "mcp.json").write_text(
-        json.dumps(
-            {
-                "mcpServers": {
-                    "noisy": {
-                        "type": "stdio",
-                        "command": "python",
-                        "args": [str(server)],
-                    }
-                }
-            }
-        ),
-        encoding="utf-8",
+    _write_mcp_config(
+        tmp_path,
+        "noisy",
+        {
+            "type": "stdio",
+            "command": sys.executable,
+            "args": [
+                "-u",
+                str(FAKE_MCP_SERVER),
+                "--transport",
+                "stdio",
+                "--noisy",
+            ],
+            "cwd": str(tmp_path),
+            "env": _test_env(),
+            "timeout": 10,
+        },
     )
 
     async def run():
         manager = McpClientManager(tmp_path)
-        return await manager.load_tools()
+        return await asyncio.wait_for(manager.load_tools(), timeout=10)
 
     tools = asyncio.run(run())
 
     assert any(tool.name == "mcp__noisy__echo" for tool in tools)
     captured = capsys.readouterr()
     assert "NOISY_MCP_STARTUP" not in captured.err
+
+
+def test_mcp_client_streamable_http_tool_lifecycle(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    port = _free_local_port()
+    ready_file = tmp_path / "http-ready.log"
+    exit_file = tmp_path / "http-exit.log"
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-u",
+            str(FAKE_MCP_SERVER),
+            "--transport",
+            "streamable-http",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--ready-file",
+            str(ready_file),
+            "--exit-file",
+            str(exit_file),
+        ],
+        cwd=str(tmp_path),
+        env={**os.environ, **_test_env()},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+    )
+    try:
+        ready = _wait_for_lines(ready_file)
+        assert ready[-1] == "ready"
+        _write_mcp_config(
+            tmp_path,
+            "fake_http",
+            {
+                "type": "streamable_http",
+                "url": f"http://127.0.0.1:{port}/mcp",
+                "timeout": 10,
+            },
+        )
+
+        async def run():
+            manager = McpClientManager(tmp_path)
+            tools = await asyncio.wait_for(manager.load_tools(), timeout=10)
+            names = [tool.name for tool in tools]
+            tool = next(item for item in tools if item.name == "mcp__fake_http__echo")
+            config = load_config(project_root=tmp_path)
+            config.policy.hitl_mode = "never"
+            result = await asyncio.wait_for(
+                tool.execute({"text": "ok"}, ToolContext(cwd=str(tmp_path), config=config)),
+                timeout=10,
+            )
+            return names, result
+
+        names, result = asyncio.run(run())
+        assert "mcp__fake_http__echo" in names
+        assert result.content == "echo:ok"
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=10)
+
+    assert process.poll() is not None
 
 
 def test_mcp_server_initialize_and_call_safe_builtin_tool(tmp_path, monkeypatch):

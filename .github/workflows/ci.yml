@@ -38,3 +38,28 @@ jobs:
 
       - name: Run tests
         run: uv run --locked pytest
+
+  mcp-windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.21"
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --extra dev --locked
+
+      - name: Run MCP tests
+        run: uv run --locked pytest tests/test_mcp.py

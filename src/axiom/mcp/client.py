@@ -7,9 +7,10 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+import httpx
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client
 from pydantic import AnyUrl
 
 from axiom.mcp.config import McpServerSpec, load_mcp_server_specs
@@ -199,11 +200,16 @@ class McpClientManager:
                 args=spec.args,
                 env={**os.environ, **spec.env},
                 cwd=spec.cwd or self.project_root,
+                encoding="utf-8",
             )
             with open(os.devnull, "w", encoding="utf-8") as errlog:
                 async with (
                     stdio_client(params, errlog=errlog) as (read, write),
-                    ClientSession(read, write) as session,
+                    ClientSession(
+                        read,
+                        write,
+                        read_timeout_seconds=timedelta(seconds=spec.timeout),
+                    ) as session,
                 ):
                     await session.initialize()
                     yield session
@@ -211,13 +217,21 @@ class McpClientManager:
         if spec.type in {"http", "streamable_http", "streamable-http"}:
             if not spec.url:
                 raise ValueError(f"MCP server {spec.name} is missing url")
+            http_client = create_mcp_http_client(
+                headers=spec.headers or None,
+                timeout=httpx.Timeout(spec.timeout, read=max(spec.timeout, 60.0)),
+            )
             async with (
-                streamablehttp_client(
+                http_client,
+                streamable_http_client(
                     spec.url,
-                    headers=spec.headers or None,
-                    timeout=spec.timeout,
+                    http_client=http_client,
                 ) as (read, write, _session_id),
-                ClientSession(read, write) as session,
+                ClientSession(
+                    read,
+                    write,
+                    read_timeout_seconds=timedelta(seconds=spec.timeout),
+                ) as session,
             ):
                 await session.initialize()
                 yield session

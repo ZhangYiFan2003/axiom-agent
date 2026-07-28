@@ -207,8 +207,15 @@ async def _handle_slash(
             json.dumps(AuditLog(config.policy.audit_log_path).tail(limit), ensure_ascii=False)
         )
     elif command == "/index":
-        count = CodeIndex(cwd).rebuild(arg or ".")
-        console.print(f"Indexed {count} code lines.")
+        stats = CodeIndex(cwd).update(arg or ".")
+        console.print(
+            "Indexed "
+            f"{stats.indexed_files} files, "
+            f"{stats.unchanged_files} unchanged, "
+            f"{stats.deleted_files} deleted, "
+            f"{stats.failed_files} failed, "
+            f"{stats.chunk_count} chunks."
+        )
     elif command == "/search":
         results = CodeIndex(cwd).search(arg, limit=20)
         output = "\n".join(f"{r.path}:{r.line}: {r.snippet}" for r in results)

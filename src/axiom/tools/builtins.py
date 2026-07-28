@@ -206,7 +206,7 @@ def get_builtin_tools() -> list[Tool]:
         ),
         Tool(
             name="search_code",
-            description="Search the local code index for semantically relevant lines.",
+            description="Search the local code index with keyword matching over AST chunks.",
             parameters=object_schema(
                 {
                     "query": {"type": "string", "description": "Search query"},

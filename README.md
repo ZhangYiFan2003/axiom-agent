@@ -26,7 +26,7 @@ The core Agent Runtime paths are covered by offline tests with fake LLM clients.
 | One-shot prompt | Runs a single prompt through the configured provider and renderer. | Manual smoke tested |
 | ReAct Agent | Executes the loop from model response to tool call, observation, and final answer. | Tested |
 | Tool Calling | Merges streamed tool-call deltas, executes registered tools, and replays tool results to the model. | Tested |
-| Built-in Tools | Includes file, shell, search, memory, skill, web, code search, and snapshot tools. | Partially tested |
+| Built-in Tools | Includes file, shell, search, memory, skill, web, AST code search, and snapshot tools. | Partially tested |
 | Memory | Stores, reads, searches, clears, and isolates scoped long-term memory in SQLite. | Tested |
 | Snapshots | Creates, restores, lists, and cleans workspace snapshots under an isolated home in tests. | Tested |
 | Skills | Loads built-in, user, and project `SKILL.md` files and supports skill context injection. | Tested |

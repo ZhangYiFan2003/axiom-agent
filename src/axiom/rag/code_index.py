@@ -1,40 +1,14 @@
 from __future__ import annotations
 
-import sqlite3
-from dataclasses import dataclass
+import hashlib
+import time
+from datetime import UTC, datetime
 from pathlib import Path
 
-TEXT_SUFFIXES = {
-    ".py",
-    ".ts",
-    ".tsx",
-    ".js",
-    ".jsx",
-    ".java",
-    ".kt",
-    ".go",
-    ".rs",
-    ".md",
-    ".toml",
-    ".yaml",
-    ".yml",
-    ".json",
-    ".xml",
-    ".html",
-    ".css",
-    ".scss",
-    ".sql",
-    ".sh",
-}
-
-SKIP_DIRS = {".git", ".venv", "node_modules", "dist", "build", "target", "__pycache__"}
-
-
-@dataclass(slots=True)
-class CodeSearchResult:
-    path: str
-    line: int
-    snippet: str
+from axiom.rag.chunker import chunk_source
+from axiom.rag.languages import SKIP_DIRS, detect_language, is_indexable
+from axiom.rag.models import CodeSearchResult, IndexedFile, IndexStats
+from axiom.rag.store import CodeIndexStore
 
 
 class CodeIndex:
@@ -43,57 +17,104 @@ class CodeIndex:
         self.db_path = (
             Path(db_path).expanduser() if db_path else self.root / ".axiom" / "code_index.sqlite3"
         )
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._ensure_schema()
+        self.store = CodeIndexStore(self.db_path)
+        self.last_stats = IndexStats()
 
     def rebuild(self, path: str | Path | None = None) -> int:
+        self.last_stats = self.update(path, force=True)
+        return self.last_stats.chunk_count
+
+    def update(self, path: str | Path | None = None, *, force: bool = False) -> IndexStats:
+        started = time.perf_counter()
         base = self._resolve(path or self.root)
         files = [base] if base.is_file() else list(self._iter_files(base))
-        with self._connect() as conn:
-            conn.execute("delete from code_chunks where root = ?", (str(self.root),))
-            count = 0
-            for file_path in files:
-                rel = str(file_path.relative_to(self.root))
-                try:
-                    lines = file_path.read_text(encoding="utf-8", errors="ignore").splitlines()
-                except OSError:
+        scanned_paths = {self._relative(file_path) for file_path in files}
+        stats = IndexStats(scanned_files=len(files))
+
+        for file_path in files:
+            rel = self._relative(file_path)
+            try:
+                file_hash = self._sha256(file_path)
+                stat = file_path.stat()
+                language = detect_language(file_path)
+                indexed = self.store.get_file(rel)
+                if not force and indexed and indexed.sha256 == file_hash:
+                    stats.unchanged_files += 1
                     continue
-                for line_number, line in enumerate(lines, start=1):
-                    stripped = line.strip()
-                    if not stripped:
-                        continue
-                    conn.execute(
-                        """
-                        insert into code_chunks(root, path, line, content)
-                        values (?, ?, ?, ?)
-                        """,
-                        (str(self.root), rel, line_number, stripped),
-                    )
-                    count += 1
-            return count
+
+                source = file_path.read_text(encoding="utf-8", errors="ignore")
+                chunks, parse_status = chunk_source(rel, language, source)
+                indexed_file = IndexedFile(
+                    path=rel,
+                    language=language,
+                    sha256=file_hash,
+                    size=stat.st_size,
+                    mtime_ns=stat.st_mtime_ns,
+                    indexed_at=datetime.now(UTC).isoformat(),
+                    parse_status=parse_status,
+                )
+                self.store.replace_file(indexed_file, chunks)
+                stats.indexed_files += 1
+            except OSError:
+                stats.failed_files += 1
+
+        stats.deleted_files = self.remove_missing_files(base, scanned_paths)
+        stats.chunk_count = self.store.count_chunks()
+        stats.duration_ms = (time.perf_counter() - started) * 1000
+        self.last_stats = stats
+        return stats
+
+    def remove_missing_files(
+        self,
+        path: str | Path | None = None,
+        scanned_paths: set[str] | None = None,
+    ) -> int:
+        base = self._resolve(path or self.root)
+        existing = scanned_paths
+        if existing is None:
+            files = [base] if base.is_file() else list(self._iter_files(base))
+            existing = {self._relative(file_path) for file_path in files}
+
+        missing: list[str] = []
+        for stored_path in self.store.list_file_paths():
+            absolute = (self.root / stored_path).resolve()
+            if base.is_file() and absolute != base:
+                continue
+            if not base.is_file() and not _is_relative_to(absolute, base):
+                continue
+            if stored_path not in existing:
+                missing.append(stored_path)
+        return self.store.delete_files(missing)
 
     def search(self, query: str, limit: int = 20) -> list[CodeSearchResult]:
         terms = [term.lower() for term in query.split() if term.strip()]
         if not terms:
             return []
-        rows: list[tuple[str, int, str]]
-        with self._connect() as conn:
-            like = f"%{terms[0]}%"
-            rows = conn.execute(
-                """
-                select path, line, content
-                from code_chunks
-                where root = ? and lower(content) like ?
-                order by path, line
-                limit 500
-                """,
-                (str(self.root), like),
-            ).fetchall()
+
+        rows = self.store.search_rows(terms[0], limit=500)
         results: list[CodeSearchResult] = []
-        for path, line, content in rows:
-            lowered = content.lower()
-            if all(term in lowered for term in terms):
-                results.append(CodeSearchResult(path, int(line), content))
+        for row in rows:
+            searchable = " ".join(
+                [
+                    str(row["content"]),
+                    str(row["symbol_name"] or ""),
+                    str(row["qualified_name"] or ""),
+                    str(row["chunk_type"] or ""),
+                ]
+            ).lower()
+            if not all(term in searchable for term in terms):
+                continue
+            snippet = _snippet(str(row["content"]))
+            results.append(
+                CodeSearchResult(
+                    path=str(row["file_path"]),
+                    line=int(row["start_line"]),
+                    snippet=snippet,
+                    chunk_type=str(row["chunk_type"]),
+                    symbol_name=row["symbol_name"],
+                    qualified_name=row["qualified_name"],
+                )
+            )
             if len(results) >= limit:
                 break
         return results
@@ -102,7 +123,7 @@ class CodeIndex:
         for path in base.rglob("*"):
             if any(part in SKIP_DIRS for part in path.parts):
                 continue
-            if path.is_file() and path.suffix.lower() in TEXT_SUFFIXES:
+            if path.is_file() and is_indexable(path):
                 yield path
 
     def _resolve(self, value: str | Path) -> Path:
@@ -113,26 +134,28 @@ class CodeIndex:
         resolved.relative_to(self.root)
         return resolved
 
-    def _ensure_schema(self) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                """
-                create table if not exists code_chunks (
-                    id integer primary key autoincrement,
-                    root text not null,
-                    path text not null,
-                    line integer not null,
-                    content text not null
-                )
-                """
-            )
-            conn.execute(
-                "create index if not exists idx_code_chunks_root_path on code_chunks(root, path)"
-            )
-            conn.execute(
-                "create index if not exists idx_code_chunks_root_content "
-                "on code_chunks(root, content)"
-            )
+    def _relative(self, path: Path) -> str:
+        return path.resolve().relative_to(self.root).as_posix()
 
-    def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.db_path)
+    def _sha256(self, path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest()
+
+
+def _snippet(content: str) -> str:
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return ""
+
+
+def _is_relative_to(path: Path, base: Path) -> bool:
+    try:
+        path.relative_to(base)
+        return True
+    except ValueError:
+        return False

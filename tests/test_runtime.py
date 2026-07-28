@@ -33,6 +33,18 @@ def test_durable_task_cancel(tmp_path):
     assert manager.get(task_id).status == "canceled"  # type: ignore[union-attr]
 
 
+def test_durable_task_ids_are_unique_under_rapid_creation(tmp_path):
+    manager = DurableTaskManager(tmp_path / "tasks.db")
+
+    task_ids = [manager.add(f"task {index}") for index in range(100)]
+
+    assert len(task_ids) == 100
+    assert len(set(task_ids)) == 100
+    assert all(task_id.startswith("task_") for task_id in task_ids)
+    assert all(len(task_id) == len("task_") + 32 for task_id in task_ids)
+    assert len(manager.list(limit=200)) == 100
+
+
 
 
 class FakeHttpRequest:

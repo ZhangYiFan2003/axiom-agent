@@ -1,0 +1,59 @@
+{
+  "environment": {
+    "python": "3.12.13 (main, Jun 11 2026, 04:05:29) [MSC v.1944 64 bit (AMD64)]",
+    "platform": "Windows-11-10.0.22621-SP0",
+    "processor": "Intel64 Family 6 Model 186 Stepping 2, GenuineIntel",
+    "timestamp": "2026-07-28T02:34:55.384620+00:00"
+  },
+  "benchmark": {
+    "tool_count": 4,
+    "delay_seconds": 0.2,
+    "warmups": 5,
+    "runs": 30,
+    "scope": "ToolExecutor.execute_all only; excludes LLM inference and process startup."
+  },
+  "results": {
+    "concurrency_1": {
+      "count": 30,
+      "successful_runs": 30,
+      "failed_runs": 0,
+      "min_ms": 814.739,
+      "max_ms": 845.99,
+      "mean_ms": 828.203,
+      "median_ms": 826.919,
+      "p95_ms": 845.579,
+      "stdev_ms": 9.123,
+      "errors": [],
+      "theoretical_ms": 800.0,
+      "improvement_vs_serial_percent": 0.0
+    },
+    "concurrency_2": {
+      "count": 30,
+      "successful_runs": 30,
+      "failed_runs": 0,
+      "min_ms": 404.618,
+      "max_ms": 426.595,
+      "mean_ms": 413.791,
+      "median_ms": 413.564,
+      "p95_ms": 422.207,
+      "stdev_ms": 5.434,
+      "errors": [],
+      "theoretical_ms": 400.0,
+      "improvement_vs_serial_percent": 49.99
+    },
+    "concurrency_4": {
+      "count": 30,
+      "successful_runs": 30,
+      "failed_runs": 0,
+      "min_ms": 200.128,
+      "max_ms": 215.404,
+      "mean_ms": 207.773,
+      "median_ms": 206.789,
+      "p95_ms": 214.937,
+      "stdev_ms": 4.651,
+      "errors": [],
+      "theoretical_ms": 200.0,
+      "improvement_vs_serial_percent": 74.99
+    }
+  }
+}

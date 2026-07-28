@@ -39,6 +39,9 @@ class CodeSearchResult:
     chunk_type: str | None = None
     symbol_name: str | None = None
     qualified_name: str | None = None
+    score: float | None = None
+    backend: str | None = None
+    matched_fields: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)

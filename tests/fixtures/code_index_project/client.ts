@@ -17,3 +17,7 @@ const normalizeUser = (id: UserId): string => {
 function buildClient(): ApiClient {
     return new HttpClient();
 }
+
+function getUserProfile(userId: UserId): string {
+    return normalizeUser(userId);
+}

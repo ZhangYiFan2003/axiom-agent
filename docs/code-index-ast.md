@@ -74,6 +74,10 @@ The schema is versioned with `schema_metadata.schema_version = 2`.
 Indexes are created for file path, symbol name, and chunk type. Chunk rows are
 linked to `indexed_files.path` with `on delete cascade`.
 
+Stage 3B-1 upgrades this schema to version 3 by adding `code_chunks_fts` for
+offline lexical search. Version 2 AST chunks are migrated in place without
+reparsing source files.
+
 ## Incremental Indexing
 
 `CodeIndex.update()` scans the requested file or directory, hashes each file, and
@@ -114,9 +118,10 @@ index is rebuilt rather than migrated row by row.
 
 ## Current Search Behavior
 
-Search remains keyword based. It matches query terms against chunk content,
-symbol names, qualified names, and chunk types. It is not vector search, semantic
-search, BM25/FTS5 ranking, or hybrid retrieval.
+Search is now offline lexical search backed by FTS5/BM25 when available, with a
+tokenized LIKE fallback when FTS5 is unavailable. It matches tokenized query
+terms against chunk content, symbol names, qualified names, file paths, and chunk
+types. It is not vector search, semantic search, or hybrid retrieval.
 
 ## Deferred Work
 
@@ -124,8 +129,7 @@ The following are intentionally out of scope for Stage 3A:
 
 - embeddings
 - vector similarity
-- jieba tokenization
-- BM25/FTS5 hybrid ranking
+- lexical/vector hybrid retrieval
 - symbol reference resolution
 - caller/callee analysis
 - static call graph construction

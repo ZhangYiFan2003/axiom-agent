@@ -206,7 +206,10 @@ def get_builtin_tools() -> list[Tool]:
         ),
         Tool(
             name="search_code",
-            description="Search the local code index with keyword matching over AST chunks.",
+            description=(
+                "FTS5/BM25 lexical search over AST code chunks with identifier "
+                "and Chinese tokenization; falls back to tokenized LIKE when FTS5 is unavailable."
+            ),
             parameters=object_schema(
                 {
                     "query": {"type": "string", "description": "Search query"},

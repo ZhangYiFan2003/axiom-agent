@@ -1,9 +1,9 @@
 # Static Symbol Index
 
-Stage 3C-1 adds a conservative static symbol, import, and reference index on top
-of the existing AST, lexical, and vector code index. It prepares structured data
-for a later call graph stage, but it does not expose caller/callee or multi-hop
-call-chain analysis.
+Stage 3C-1 added a conservative static symbol, import, and reference index on
+top of the existing AST, lexical, and vector code index. Stage 3C-2 consumes this
+data to build high-confidence static call edges, but symbol resolution remains a
+separate precision-first layer.
 
 ## Parse Once
 
@@ -110,7 +110,8 @@ JavaScript and TypeScript:
 
 ## SQLite Schema
 
-Schema version: `5`
+Schema version: `5` introduced symbol tables. Stage 3C-2 migrates the database
+to version `6` by adding call edges.
 
 New tables:
 
@@ -126,8 +127,9 @@ The v4 to v5 migration is additive. It preserves:
 - `embedding_profiles`
 - `chunk_embeddings`
 
-The new graph tables may be empty immediately after migration. The next
-`update()` backfills symbol data for parsed files.
+The symbol tables may be empty immediately after migration. The next `update()`
+backfills symbol data for parsed files. The later v6 call-edge migration is also
+additive and does not reparse source files.
 
 ## Incremental Behavior
 
@@ -151,8 +153,7 @@ resolve_symbol_at(file_path, line, column=None)
 ```
 
 The REPL exposes `/symbol` and `/references`. Built-in tools expose
-`find_symbol` and `find_references`. These names deliberately avoid call graph
-terminology.
+`find_symbol` and `find_references`.
 
 ## Limitations
 
@@ -161,6 +162,7 @@ terminology.
 - No full Java overload resolution.
 - No wildcard import guessing.
 - No dynamic import/eval/reflection resolution.
-- No caller/callee edge table yet.
-- No recursive or multi-hop call-chain analysis yet.
+- Exact call edges are limited to high-confidence `call` and `constructor_call`
+  references.
+- No runtime dispatch or full call graph.
 - No LLM or vector similarity is used for symbol resolution.

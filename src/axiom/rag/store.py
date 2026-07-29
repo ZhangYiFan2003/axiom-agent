@@ -8,6 +8,7 @@ from pathlib import Path
 from axiom.rag.analysis import FileAnalysis
 from axiom.rag.embeddings import EmbeddingProfile
 from axiom.rag.models import (
+    CallEdge,
     CodeChunk,
     ImportBinding,
     IndexedFile,
@@ -17,7 +18,7 @@ from axiom.rag.models import (
 from axiom.rag.tokenizer import build_lexical_text
 from axiom.rag.vectors import VectorError, cosine_similarity, decode_vector
 
-SCHEMA_VERSION = "5"
+SCHEMA_VERSION = "6"
 
 
 class CodeIndexStore:
@@ -33,20 +34,28 @@ class CodeIndexStore:
 
     def ensure_schema(self) -> None:
         with self.connect() as conn:
-            state = self._schema_state(conn)
-            if state == "legacy":
-                self._drop_schema(conn)
-                self._create_schema(conn, set_version=True)
-            elif state == "v2":
-                self._migrate_v2_to_v3(conn)
-                self._migrate_v3_to_v4(conn)
-            elif state == "v3":
-                self._migrate_v3_to_v4(conn)
-                self._migrate_v4_to_v5(conn)
-            elif state == "v4":
-                self._migrate_v4_to_v5(conn)
-            else:
-                self._create_schema(conn, set_version=True)
+            for _ in range(8):
+                state = self._schema_state(conn)
+                if state == "v6":
+                    return
+                if state in {"empty", "legacy"}:
+                    self._drop_schema(conn)
+                    self._create_schema(conn, set_version=True)
+                    return
+                if state == "v2":
+                    self._migrate_v2_to_v3(conn)
+                    continue
+                if state == "v3":
+                    self._migrate_v3_to_v4(conn)
+                    continue
+                if state == "v4":
+                    self._migrate_v4_to_v5(conn)
+                    continue
+                if state == "v5":
+                    self._migrate_v5_to_v6(conn)
+                    continue
+                raise RuntimeError(f"unsupported code index schema state: {state}")
+            raise RuntimeError("code index schema migration did not converge")
 
     def has_fts5(self) -> bool:
         with self.connect() as conn:
@@ -318,15 +327,28 @@ class CodeIndexStore:
         imports: Iterable[ImportBinding],
         references: Iterable[SymbolReference],
     ) -> None:
+        self.replace_workspace_graph(imports, references, [])
+
+    def replace_workspace_graph(
+        self,
+        imports: Iterable[ImportBinding],
+        references: Iterable[SymbolReference],
+        call_edges: Iterable[CallEdge],
+    ) -> None:
         import_items = list(imports)
         reference_items = list(references)
+        edge_items = list(call_edges)
         with self.connect() as conn:
             if not self._has_symbol_tables(conn):
                 self._create_symbol_tables(conn)
+            if not self._has_call_graph_tables(conn):
+                self._create_call_graph_tables(conn)
+            conn.execute("delete from call_edges")
             conn.execute("delete from import_bindings")
             conn.execute("delete from symbol_references")
             self._insert_import_rows(conn, import_items)
             self._insert_reference_rows(conn, reference_items)
+            self._insert_call_edge_rows(conn, edge_items)
 
     def find_definitions(
         self,
@@ -382,6 +404,81 @@ class CodeIndexStore:
                 (symbol_id_or_name, symbol_id_or_name, limit),
             ).fetchall()
         return [_reference_from_row(row) for row in rows]
+
+    def list_call_edges(self) -> list[CallEdge]:
+        if not self._has_call_graph_tables():
+            return []
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                select
+                    id, reference_id, caller_symbol_id, callee_symbol_id, file_path,
+                    language, edge_kind, start_line, end_line, resolution_confidence,
+                    resolution_reason
+                from call_edges
+                order by file_path, start_line, caller_symbol_id, callee_symbol_id, id
+                """
+            ).fetchall()
+        return [_call_edge_from_row(row) for row in rows]
+
+    def find_callers(self, symbol_id: str, *, limit: int = 100) -> list[CallEdge]:
+        if not self._has_call_graph_tables():
+            return []
+        bounded_limit = min(max(limit, 1), 1000)
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                select
+                    e.id, e.reference_id, e.caller_symbol_id, e.callee_symbol_id,
+                    e.file_path, e.language, e.edge_kind, e.start_line, e.end_line,
+                    e.resolution_confidence, e.resolution_reason
+                from call_edges e
+                join symbol_definitions caller on caller.id = e.caller_symbol_id
+                where e.callee_symbol_id = ?
+                order by e.file_path, e.start_line, caller.qualified_name, e.id
+                limit ?
+                """,
+                (symbol_id, bounded_limit),
+            ).fetchall()
+        return [_call_edge_from_row(row) for row in rows]
+
+    def find_callees(self, symbol_id: str, *, limit: int = 100) -> list[CallEdge]:
+        if not self._has_call_graph_tables():
+            return []
+        bounded_limit = min(max(limit, 1), 1000)
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                select
+                    e.id, e.reference_id, e.caller_symbol_id, e.callee_symbol_id,
+                    e.file_path, e.language, e.edge_kind, e.start_line, e.end_line,
+                    e.resolution_confidence, e.resolution_reason
+                from call_edges e
+                join symbol_definitions callee on callee.id = e.callee_symbol_id
+                where e.caller_symbol_id = ?
+                order by e.file_path, e.start_line, callee.qualified_name, e.id
+                limit ?
+                """,
+                (symbol_id, bounded_limit),
+            ).fetchall()
+        return [_call_edge_from_row(row) for row in rows]
+
+    def get_definition_by_id(self, symbol_id: str) -> SymbolDefinition | None:
+        if not self._has_symbol_tables():
+            return None
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                select
+                    id, file_path, language, symbol_kind, name, qualified_name,
+                    container_symbol_id, container_qualified_name, signature,
+                    start_line, end_line, chunk_id, exported, visibility, definition_hash
+                from symbol_definitions
+                where id = ?
+                """,
+                (symbol_id,),
+            ).fetchone()
+        return _symbol_from_row(row) if row else None
 
     def get_embedding_hashes(self, profile_id: str) -> dict[str, str]:
         if not self._has_vector_tables():
@@ -544,6 +641,8 @@ class CodeIndexStore:
             return "v3"
         if version == "4":
             return "v4"
+        if version == "5":
+            return "v5"
         if version != SCHEMA_VERSION:
             return "legacy"
         if supports_fts5(conn) and not self._table_exists(conn, "code_chunks_fts"):
@@ -552,10 +651,13 @@ class CodeIndexStore:
             return "v3"
         if not self._has_symbol_tables(conn):
             return "v4"
-        return "v5"
+        if not self._has_call_graph_tables(conn):
+            return "v5"
+        return "v6"
 
     def _drop_schema(self, conn: sqlite3.Connection) -> None:
         conn.execute("drop table if exists code_chunks_fts")
+        conn.execute("drop table if exists call_edges")
         conn.execute("drop table if exists symbol_references")
         conn.execute("drop table if exists import_bindings")
         conn.execute("drop table if exists symbol_definitions")
@@ -616,6 +718,7 @@ class CodeIndexStore:
             self._create_fts_table(conn)
         self._create_vector_tables(conn)
         self._create_symbol_tables(conn)
+        self._create_call_graph_tables(conn)
         if set_version:
             conn.execute(
                 """
@@ -707,6 +810,15 @@ class CodeIndexStore:
 
     def _migrate_v4_to_v5(self, conn: sqlite3.Connection) -> None:
         self._create_symbol_tables(conn)
+        conn.execute(
+            """
+            insert or replace into schema_metadata(key, value)
+            values ('schema_version', '5')
+            """
+        )
+
+    def _migrate_v5_to_v6(self, conn: sqlite3.Connection) -> None:
+        self._create_call_graph_tables(conn)
         conn.execute(
             """
             insert or replace into schema_metadata(key, value)
@@ -841,6 +953,8 @@ class CodeIndexStore:
     def _delete_symbol_rows(self, conn: sqlite3.Connection, file_path: str) -> None:
         if not self._has_symbol_tables(conn):
             return
+        if self._has_call_graph_tables(conn):
+            conn.execute("delete from call_edges where file_path = ?", (file_path,))
         conn.execute("delete from symbol_references where file_path = ?", (file_path,))
         conn.execute("delete from import_bindings where file_path = ?", (file_path,))
         conn.execute("delete from symbol_definitions where file_path = ?", (file_path,))
@@ -956,6 +1070,73 @@ class CodeIndexStore:
             ],
         )
 
+    def _create_call_graph_tables(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            create table if not exists call_edges (
+                id text primary key,
+                reference_id text not null unique
+                    references symbol_references(id) on delete cascade,
+                caller_symbol_id text not null
+                    references symbol_definitions(id) on delete cascade,
+                callee_symbol_id text not null
+                    references symbol_definitions(id) on delete cascade,
+                file_path text not null references indexed_files(path) on delete cascade,
+                language text not null,
+                edge_kind text not null,
+                start_line integer not null,
+                end_line integer not null,
+                resolution_confidence real not null,
+                resolution_reason text,
+                check (edge_kind in ('call', 'constructor_call'))
+            )
+            """
+        )
+        for statement in [
+            "create index if not exists idx_call_edges_reference on call_edges(reference_id)",
+            "create index if not exists idx_call_edges_caller on call_edges(caller_symbol_id)",
+            "create index if not exists idx_call_edges_callee on call_edges(callee_symbol_id)",
+            "create index if not exists idx_call_edges_file on call_edges(file_path)",
+            "create index if not exists idx_call_edges_kind on call_edges(edge_kind)",
+            (
+                "create index if not exists idx_call_edges_pair "
+                "on call_edges(caller_symbol_id, callee_symbol_id)"
+            ),
+        ]:
+            conn.execute(statement)
+
+    def _insert_call_edge_rows(
+        self,
+        conn: sqlite3.Connection,
+        edges: Iterable[CallEdge],
+    ) -> None:
+        conn.executemany(
+            """
+            insert into call_edges(
+                id, reference_id, caller_symbol_id, callee_symbol_id, file_path,
+                language, edge_kind, start_line, end_line, resolution_confidence,
+                resolution_reason
+            )
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    item.id,
+                    item.reference_id,
+                    item.caller_symbol_id,
+                    item.callee_symbol_id,
+                    item.file_path,
+                    item.language,
+                    item.edge_kind,
+                    item.start_line,
+                    item.end_line,
+                    item.resolution_confidence,
+                    item.resolution_reason,
+                )
+                for item in edges
+            ],
+        )
+
     def _table_exists(self, conn: sqlite3.Connection, name: str) -> bool:
         row = conn.execute(
             "select name from sqlite_master where type = 'table' and name = ?",
@@ -980,6 +1161,12 @@ class CodeIndexStore:
             )
         with self.connect() as owned:
             return self._has_symbol_tables(owned)
+
+    def _has_call_graph_tables(self, conn: sqlite3.Connection | None = None) -> bool:
+        if conn is not None:
+            return self._table_exists(conn, "call_edges")
+        with self.connect() as owned:
+            return self._has_call_graph_tables(owned)
 
 
 def supports_fts5(conn: sqlite3.Connection) -> bool:
@@ -1063,6 +1250,22 @@ def _reference_from_row(row: sqlite3.Row | tuple[object, ...]) -> SymbolReferenc
         resolution_status=str(row[12]),
         resolution_confidence=float(row[13]),
         resolution_reason=row[14],
+    )
+
+
+def _call_edge_from_row(row: sqlite3.Row | tuple[object, ...]) -> CallEdge:
+    return CallEdge(
+        id=str(row[0]),
+        reference_id=str(row[1]),
+        caller_symbol_id=str(row[2]),
+        callee_symbol_id=str(row[3]),
+        file_path=str(row[4]),
+        language=str(row[5]),
+        edge_kind=str(row[6]),
+        start_line=int(row[7]),
+        end_line=int(row[8]),
+        resolution_confidence=float(row[9]),
+        resolution_reason=row[10],
     )
 
 

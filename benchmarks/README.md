@@ -46,3 +46,23 @@ Run from the repository root:
 The benchmark separates query embedding time, vector scan time, and end-to-end
 local search timings for lexical, vector-only, and hybrid modes. Result files
 are machine-specific evidence artifacts and should be reviewed before commit.
+
+## Call Graph Benchmark
+
+`benchmark_call_graph.py` measures local static call graph operations over
+generated synthetic edges. It does not parse source files, read a real
+repository index, call an LLM, use embeddings, or access the network.
+
+Run from the repository root:
+
+```powershell
+.\.venv\Scripts\python.exe benchmarks\benchmark_call_graph.py `
+  --edges 100 1000 10000 `
+  --warmups 5 `
+  --runs 30 `
+  --output benchmarks\results\call-graph-local.json
+```
+
+The benchmark reports direct callers, direct callees, depth-3 traversal, and SCC
+timings. Result files are machine-specific evidence artifacts and should be
+reviewed before commit.

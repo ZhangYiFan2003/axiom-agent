@@ -86,6 +86,44 @@ class SymbolReference:
 
 
 @dataclass(slots=True)
+class CallEdge:
+    id: str
+    reference_id: str
+    caller_symbol_id: str
+    callee_symbol_id: str
+    file_path: str
+    language: str
+    edge_kind: str
+    start_line: int
+    end_line: int
+    resolution_confidence: float
+    resolution_reason: str | None
+
+
+@dataclass(slots=True)
+class CallPath:
+    symbol_ids: tuple[str, ...]
+    edge_ids: tuple[str, ...]
+    cycle: bool = False
+
+
+@dataclass(slots=True)
+class CallPathResult:
+    root_symbol_id: str
+    direction: str
+    max_depth: int
+    paths: list[CallPath]
+    truncated: bool
+
+
+@dataclass(slots=True)
+class RecursiveComponent:
+    symbol_ids: tuple[str, ...]
+    edge_ids: tuple[str, ...]
+    recursion_kind: str
+
+
+@dataclass(slots=True)
 class CodeSearchResult:
     path: str
     line: int
@@ -125,3 +163,11 @@ class IndexStats:
     references_unresolved: int = 0
     references_ambiguous: int = 0
     resolution_duration_ms: float = 0.0
+    call_edges_built: int = 0
+    call_edges_skipped_unresolved: int = 0
+    call_edges_skipped_low_confidence: int = 0
+    call_edges_skipped_unsupported_kind: int = 0
+    call_edges_skipped_missing_caller: int = 0
+    call_edges_skipped_missing_callee: int = 0
+    recursive_components: int = 0
+    call_graph_duration_ms: float = 0.0

@@ -8,6 +8,14 @@ from pathlib import Path
 
 from axiom.config import EmbeddingConfig
 from axiom.rag.analysis import analyze_source
+from axiom.rag.call_graph import (
+    HARD_MAX_DEPTH,
+    HARD_MAX_PATHS,
+    build_call_edges,
+    find_recursive_components,
+    resolve_symbol_query,
+    trace_call_paths,
+)
 from axiom.rag.embeddings import (
     EmbeddingError,
     EmbeddingProfile,
@@ -21,9 +29,12 @@ from axiom.rag.embeddings import (
 from axiom.rag.hybrid import FusionWeights, reciprocal_rank_fusion, vector_results
 from axiom.rag.languages import SKIP_DIRS, detect_language, is_indexable
 from axiom.rag.models import (
+    CallEdge,
+    CallPathResult,
     CodeSearchResult,
     IndexedFile,
     IndexStats,
+    RecursiveComponent,
     SymbolDefinition,
     SymbolReference,
 )
@@ -211,6 +222,44 @@ class CodeIndex:
     ) -> list[SymbolReference]:
         return self.store.find_references(symbol_id_or_name, limit=limit)
 
+    def find_callers(
+        self,
+        symbol_id_or_name: str,
+        *,
+        limit: int = 100,
+    ) -> list[CallEdge]:
+        symbol = self._lookup_symbol(symbol_id_or_name)
+        return self.store.find_callers(symbol.id, limit=limit)
+
+    def find_callees(
+        self,
+        symbol_id_or_name: str,
+        *,
+        limit: int = 100,
+    ) -> list[CallEdge]:
+        symbol = self._lookup_symbol(symbol_id_or_name)
+        return self.store.find_callees(symbol.id, limit=limit)
+
+    def trace_call_paths(
+        self,
+        symbol_id_or_name: str,
+        *,
+        direction: str = "outgoing",
+        max_depth: int = 3,
+        max_paths: int = 100,
+    ) -> CallPathResult:
+        symbol = self._lookup_symbol(symbol_id_or_name)
+        return trace_call_paths(
+            symbol.id,
+            self.store.list_call_edges(),
+            direction=direction,
+            max_depth=min(max_depth, HARD_MAX_DEPTH),
+            max_paths=min(max_paths, HARD_MAX_PATHS),
+        )
+
+    def find_recursive_components(self) -> list[RecursiveComponent]:
+        return find_recursive_components(self.store.list_call_edges())
+
     def resolve_symbol_at(
         self,
         file_path: str,
@@ -357,7 +406,9 @@ class CodeIndex:
         file_paths = set(self.store.list_file_paths())
         resolved_imports = resolve_import_paths(imports, file_paths)
         resolved_references = resolve_references(definitions, resolved_imports, references)
-        self.store.replace_workspace_symbols(resolved_imports, resolved_references)
+        graph = build_call_edges(definitions, resolved_references)
+        recursive_components = find_recursive_components(graph.edges)
+        self.store.replace_workspace_graph(resolved_imports, resolved_references, graph.edges)
         stats.references_resolved = sum(
             1 for reference in resolved_references if reference.resolution_status == "resolved"
         )
@@ -367,7 +418,21 @@ class CodeIndex:
         stats.references_ambiguous = sum(
             1 for reference in resolved_references if reference.resolution_status == "ambiguous"
         )
+        stats.call_edges_built = len(graph.edges)
+        stats.call_edges_skipped_unresolved = graph.skipped_unresolved
+        stats.call_edges_skipped_low_confidence = graph.skipped_low_confidence
+        stats.call_edges_skipped_unsupported_kind = graph.skipped_unsupported_kind
+        stats.call_edges_skipped_missing_caller = graph.skipped_missing_caller
+        stats.call_edges_skipped_missing_callee = graph.skipped_missing_callee
+        stats.recursive_components = len(recursive_components)
         stats.resolution_duration_ms = (time.perf_counter() - started) * 1000
+        stats.call_graph_duration_ms = stats.resolution_duration_ms
+
+    def _lookup_symbol(self, symbol_id_or_name: str) -> SymbolDefinition:
+        return resolve_symbol_query(
+            symbol_id_or_name,
+            self.store.list_symbol_definitions(),
+        )
 
     def _profile_for_provider(
         self,

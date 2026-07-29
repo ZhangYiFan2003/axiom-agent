@@ -24,3 +24,25 @@ is written next to the JSON file.
 
 Machine-specific result files under `benchmarks/results/` are evidence artifacts.
 Review them before deciding whether to commit them.
+
+## Code Search Benchmark
+
+`benchmark_code_search.py` measures local lexical, vector-only, and hybrid code
+search over generated synthetic Python chunks. It uses a deterministic local
+embedding provider and does not call an LLM, a remote embedding endpoint, the
+network, or a real repository index.
+
+Run from the repository root:
+
+```powershell
+.\.venv\Scripts\python.exe benchmarks\benchmark_code_search.py `
+  --chunks 100 1000 5000 `
+  --dimensions 64 `
+  --warmups 5 `
+  --runs 30 `
+  --output benchmarks\results\code-search-local.json
+```
+
+The benchmark separates query embedding time, vector scan time, and end-to-end
+local search timings for lexical, vector-only, and hybrid modes. Result files
+are machine-specific evidence artifacts and should be reviewed before commit.

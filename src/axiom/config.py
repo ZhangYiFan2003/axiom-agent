@@ -25,6 +25,23 @@ class LlmConfig:
 
 
 @dataclass(slots=True)
+class EmbeddingConfig:
+    enabled: bool = False
+    provider: str = "openai-compatible"
+    model: str = ""
+    api_key: str = ""
+    base_url: str | None = None
+    dimensions: int | None = None
+    timeout: float = 60.0
+    batch_size: int = 64
+    search_mode: str = "auto"
+    lexical_weight: float = 0.55
+    vector_weight: float = 0.45
+    candidate_limit: int = 200
+    max_input_chars: int = 12000
+
+
+@dataclass(slots=True)
 class ToolsConfig:
     enabled: list[str] = field(default_factory=list)
     disabled: list[str] = field(default_factory=list)
@@ -90,6 +107,7 @@ class FeatureConfig:
 @dataclass(slots=True)
 class AxiomConfig:
     llm: LlmConfig = field(default_factory=LlmConfig)
+    embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     render_mode: str = "inline"
     tools: ToolsConfig = field(default_factory=ToolsConfig)
     mcp: McpConfig = field(default_factory=McpConfig)
@@ -141,6 +159,8 @@ def config_to_public_dict(config: AxiomConfig) -> dict[str, Any]:
     data = _config_to_dict(config)
     if data.get("llm", {}).get("api_key"):
         data["llm"]["api_key"] = "***"
+    if data.get("embedding", {}).get("api_key"):
+        data["embedding"]["api_key"] = "***"
     return data
 
 
@@ -180,6 +200,7 @@ def _read_env(path: Path) -> dict[str, str]:
 def _apply_env(data: dict[str, Any], env: dict[str, str | None]) -> dict[str, Any]:
     result = deepcopy(data)
     llm = result.setdefault("llm", {})
+    embedding = result.setdefault("embedding", {})
     features = result.setdefault("features", {})
     policy = result.setdefault("policy", {})
 
@@ -196,6 +217,24 @@ def _apply_env(data: dict[str, Any], env: dict[str, str | None]) -> dict[str, An
         if raw not in (None, ""):
             with suppress(TypeError, ValueError):
                 llm[config_key] = caster(raw)
+
+    embedding_mappings: list[tuple[str, str, Any]] = [
+        ("AXIOM_EMBEDDING_PROVIDER", "provider", str),
+        ("AXIOM_EMBEDDING_MODEL", "model", str),
+        ("AXIOM_EMBEDDING_API_KEY", "api_key", str),
+        ("AXIOM_EMBEDDING_BASE_URL", "base_url", str),
+        ("AXIOM_EMBEDDING_DIMENSIONS", "dimensions", int),
+        ("AXIOM_EMBEDDING_BATCH_SIZE", "batch_size", int),
+        ("AXIOM_CODE_SEARCH_MODE", "search_mode", str),
+    ]
+    enabled = env.get("AXIOM_EMBEDDING_ENABLED")
+    if enabled in {"true", "false"}:
+        embedding["enabled"] = enabled == "true"
+    for env_key, config_key, caster in embedding_mappings:
+        raw = env.get(env_key)
+        if raw not in (None, ""):
+            with suppress(TypeError, ValueError):
+                embedding[config_key] = caster(raw)
 
     provider = str(llm.get("provider") or "").lower()
     if not llm.get("api_key"):
@@ -266,6 +305,7 @@ def _config_to_dict(config: AxiomConfig) -> dict[str, Any]:
 def _dict_to_config(data: dict[str, Any]) -> AxiomConfig:
     return AxiomConfig(
         llm=LlmConfig(**data.get("llm", {})),
+        embedding=EmbeddingConfig(**data.get("embedding", {})),
         render_mode=data.get("render_mode", "inline"),
         tools=ToolsConfig(**data.get("tools", {})),
         mcp=McpConfig(**data.get("mcp", {})),

@@ -6,22 +6,45 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+from axiom.config import EmbeddingConfig
 from axiom.rag.chunker import chunk_source
+from axiom.rag.embeddings import (
+    EmbeddingError,
+    EmbeddingProfile,
+    EmbeddingProvider,
+    build_embedding_profile,
+    build_embedding_text,
+    embedding_input_hash,
+    infer_dimensions,
+    is_embedding_eligible,
+)
+from axiom.rag.hybrid import FusionWeights, reciprocal_rank_fusion, vector_results
 from axiom.rag.languages import SKIP_DIRS, detect_language, is_indexable
 from axiom.rag.models import CodeSearchResult, IndexedFile, IndexStats
 from axiom.rag.ranking import rank_rows
 from axiom.rag.store import CodeIndexStore
 from axiom.rag.tokenizer import fts_match_query, tokenize_code_text, tokenize_query
+from axiom.rag.vectors import encode_vector, normalize_vector
 
 
 class CodeIndex:
-    def __init__(self, root: str | Path, db_path: str | Path | None = None):
+    def __init__(
+        self,
+        root: str | Path,
+        db_path: str | Path | None = None,
+        *,
+        embedding_provider: EmbeddingProvider | None = None,
+        search_config: EmbeddingConfig | None = None,
+    ):
         self.root = Path(root).resolve()
         self.db_path = (
             Path(db_path).expanduser() if db_path else self.root / ".axiom" / "code_index.sqlite3"
         )
         self.store = CodeIndexStore(self.db_path)
         self.last_stats = IndexStats()
+        self.embedding_provider = embedding_provider
+        self.search_config = search_config or EmbeddingConfig()
+        self._embedding_profile: EmbeddingProfile | None = None
 
     def rebuild(self, path: str | Path | None = None) -> int:
         self.last_stats = self.update(path, force=True)
@@ -62,6 +85,8 @@ class CodeIndex:
                 stats.failed_files += 1
 
         stats.deleted_files = self.remove_missing_files(base, scanned_paths)
+        if self.embedding_provider and self.search_config.enabled:
+            self._merge_embedding_stats(stats, self.sync_embeddings())
         stats.chunk_count = self.store.count_chunks()
         stats.duration_ms = (time.perf_counter() - started) * 1000
         self.last_stats = stats
@@ -89,7 +114,108 @@ class CodeIndex:
                 missing.append(stored_path)
         return self.store.delete_files(missing)
 
-    def search(self, query: str, limit: int = 20) -> list[CodeSearchResult]:
+    def sync_embeddings(self) -> IndexStats:
+        stats = IndexStats()
+        provider = self.embedding_provider
+        if provider is None:
+            return stats
+        try:
+            chunks = [chunk for chunk in self.store.list_chunks() if is_embedding_eligible(chunk)]
+            if not chunks:
+                return stats
+            profile = self._profile_for_provider(provider, chunks[0])
+            stats.embedding_profile = profile.id
+            self.store.upsert_embedding_profile(profile)
+            current_hashes = self.store.get_embedding_hashes(profile.id)
+            pending: list[tuple[str, str, str]] = []
+            for chunk in chunks:
+                text = build_embedding_text(
+                    chunk,
+                    max_chars=self.search_config.max_input_chars,
+                )
+                input_hash = embedding_input_hash(text)
+                if current_hashes.get(chunk.id) == input_hash:
+                    stats.unchanged_embeddings += 1
+                    continue
+                pending.append((chunk.id, input_hash, text))
+            if not pending:
+                return stats
+            texts = [item[2] for item in pending]
+            vectors = provider.embed(texts)
+            rows = [
+                (
+                    chunk_id,
+                    input_hash,
+                    encode_vector(vector, dimensions=profile.dimensions),
+                )
+                for (chunk_id, input_hash, _text), vector in zip(pending, vectors, strict=True)
+            ]
+            self.store.replace_embeddings(profile, rows)
+            stats.embedded_chunks = len(rows)
+        except (EmbeddingError, ValueError):
+            stats.failed_embeddings += 1
+        return stats
+
+    def search(
+        self,
+        query: str,
+        limit: int = 20,
+        *,
+        mode: str = "auto",
+    ) -> list[CodeSearchResult]:
+        tokens = tokenize_query(query)
+        if not tokens:
+            return []
+
+        selected_mode = self._resolve_search_mode(mode)
+        if selected_mode == "lexical":
+            return self._search_lexical(query, limit)
+        if selected_mode == "vector":
+            return self._search_vector(query, limit)
+        if selected_mode == "hybrid":
+            return self._search_hybrid(query, limit)
+        return self._search_auto(query, limit)
+
+    def _search_auto(self, query: str, limit: int) -> list[CodeSearchResult]:
+        if not self.embedding_provider or not self.search_config.enabled:
+            return self._search_lexical(query, limit)
+        try:
+            profile = self._current_profile()
+            if profile is None or self.store.count_embeddings(profile.id) == 0:
+                return self._search_lexical(query, limit)
+            return self._search_hybrid(query, limit)
+        except EmbeddingError:
+            return self._search_lexical(query, limit)
+
+    def _search_lexical(self, query: str, limit: int) -> list[CodeSearchResult]:
+        rows = self._lexical_rows(query, limit=self.search_config.candidate_limit)
+        return rank_rows(rows, query, limit)
+
+    def _search_vector(self, query: str, limit: int) -> list[CodeSearchResult]:
+        rows = self._vector_rows(query, limit=self.search_config.candidate_limit)
+        return vector_results(rows, query, limit)
+
+    def _search_hybrid(self, query: str, limit: int) -> list[CodeSearchResult]:
+        try:
+            vector_rows = self._vector_rows(query, limit=self.search_config.candidate_limit)
+        except EmbeddingError:
+            return self._search_lexical(query, limit)
+        lexical_rows = self._lexical_rows(query, limit=self.search_config.candidate_limit)
+        lexical_backend = lexical_rows[0]["backend"] if lexical_rows else "fts5"
+        backend = "hybrid-like-fallback" if lexical_backend == "like-fallback" else "hybrid"
+        return reciprocal_rank_fusion(
+            lexical_rows,
+            vector_rows,
+            query,
+            limit,
+            weights=FusionWeights(
+                lexical=self.search_config.lexical_weight,
+                vector=self.search_config.vector_weight,
+            ),
+            backend=backend,
+        )
+
+    def _lexical_rows(self, query: str, *, limit: int) -> list[dict[str, object]]:
         tokens = tokenize_query(query)
         if not tokens:
             return []
@@ -97,12 +223,22 @@ class CodeIndex:
         rows: list[dict[str, object]]
         if self.store.has_fts5():
             try:
-                rows = self.store.search_fts(fts_match_query(tokens), limit=200)
+                rows = self.store.search_fts(fts_match_query(tokens), limit=limit)
             except sqlite3.DatabaseError:
                 rows = self._fallback_rows(tokens)
         else:
             rows = self._fallback_rows(tokens)
-        return rank_rows(rows, query, limit)
+        return rows
+
+    def _vector_rows(self, query: str, *, limit: int) -> list[dict[str, object]]:
+        provider = self.embedding_provider
+        if provider is None:
+            raise EmbeddingError("embedding provider is not configured")
+        profile = self._current_profile()
+        if profile is None:
+            raise EmbeddingError("embedding profile is not available")
+        query_vector = normalize_vector(provider.embed([query])[0])
+        return self.store.search_vectors(query_vector, profile=profile, limit=limit)
 
     def _iter_files(self, base: Path):
         for path in base.rglob("*"):
@@ -148,6 +284,43 @@ class CodeIndex:
             if all(token in searchable for token in tokens):
                 filtered.append(row)
         return filtered
+
+    def _profile_for_provider(
+        self,
+        provider: EmbeddingProvider,
+        sample_chunk,
+    ) -> EmbeddingProfile:
+        if self._embedding_profile is not None:
+            return self._embedding_profile
+        sample_text = build_embedding_text(
+            sample_chunk,
+            max_chars=self.search_config.max_input_chars,
+        )
+        dimensions = infer_dimensions(provider, sample_text)
+        self._embedding_profile = build_embedding_profile(provider, dimensions=dimensions)
+        return self._embedding_profile
+
+    def _current_profile(self) -> EmbeddingProfile | None:
+        if not self.embedding_provider:
+            return None
+        if self._embedding_profile is not None:
+            return self._embedding_profile
+        chunks = [chunk for chunk in self.store.list_chunks() if is_embedding_eligible(chunk)]
+        if not chunks:
+            return None
+        return self._profile_for_provider(self.embedding_provider, chunks[0])
+
+    def _resolve_search_mode(self, mode: str) -> str:
+        configured = mode if mode != "auto" else self.search_config.search_mode
+        if configured not in {"auto", "lexical", "vector", "hybrid"}:
+            return "auto"
+        return configured
+
+    def _merge_embedding_stats(self, target: IndexStats, source: IndexStats) -> None:
+        target.embedded_chunks += source.embedded_chunks
+        target.unchanged_embeddings += source.unchanged_embeddings
+        target.failed_embeddings += source.failed_embeddings
+        target.embedding_profile = source.embedding_profile
 
 
 def _is_relative_to(path: Path, base: Path) -> bool:

@@ -42,6 +42,12 @@ class CodeSearchResult:
     score: float | None = None
     backend: str | None = None
     matched_fields: tuple[str, ...] = ()
+    lexical_score: float | None = None
+    vector_score: float | None = None
+    fusion_score: float | None = None
+    lexical_rank: int | None = None
+    vector_rank: int | None = None
+    embedding_profile: str | None = None
 
 
 @dataclass(slots=True)
@@ -53,3 +59,7 @@ class IndexStats:
     failed_files: int = 0
     chunk_count: int = 0
     duration_ms: float = 0.0
+    embedded_chunks: int = 0
+    unchanged_embeddings: int = 0
+    failed_embeddings: int = 0
+    embedding_profile: str | None = None

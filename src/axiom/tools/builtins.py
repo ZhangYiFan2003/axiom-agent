@@ -10,7 +10,8 @@ from typing import Any
 from axiom.lsp import diagnose_file
 from axiom.memory import MemoryManager
 from axiom.policy import CommandGuard, PathGuard
-from axiom.rag import CodeIndex
+from axiom.rag.code_index_factory import create_code_index
+from axiom.rag.embeddings import EmbeddingError
 from axiom.skill import SkillRegistry
 from axiom.snapshot import SnapshotService
 from axiom.tools.base import Tool, ToolContext, ToolResult, object_schema
@@ -402,11 +403,23 @@ async def load_skill(payload: dict[str, Any], context: ToolContext) -> ToolResul
 
 
 async def search_code(payload: dict[str, Any], context: ToolContext) -> ToolResult:
-    index = CodeIndex(context.cwd)
-    results = index.search(str(payload["query"]), limit=int(payload.get("limit") or 20))
+    index = create_code_index(context.cwd, context.config)
+    try:
+        results = await asyncio.to_thread(
+            index.search,
+            str(payload["query"]),
+            int(payload.get("limit") or 20),
+            mode=context.config.embedding.search_mode,
+        )
+    except EmbeddingError as exc:
+        return ToolResult(f"Embedding search unavailable: {exc}", is_error=True)
     if not results:
         return ToolResult("(no indexed matches; run /index first)")
-    return ToolResult("\n".join(f"{item.path}:{item.line}: {item.snippet}" for item in results))
+    backend = results[0].backend or "lexical"
+    return ToolResult(
+        "\n".join(f"{item.path}:{item.line}: {item.snippet}" for item in results),
+        display_summary=f"code search: {backend}",
+    )
 
 
 async def revert_turn(payload: dict[str, Any], context: ToolContext) -> ToolResult:

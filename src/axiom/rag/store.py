@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterable
+from datetime import UTC, datetime
 from pathlib import Path
 
+from axiom.rag.embeddings import EmbeddingProfile
 from axiom.rag.models import CodeChunk, IndexedFile
 from axiom.rag.tokenizer import build_lexical_text
+from axiom.rag.vectors import VectorError, cosine_similarity, decode_vector
 
-SCHEMA_VERSION = "3"
+SCHEMA_VERSION = "4"
 
 
 class CodeIndexStore:
@@ -29,13 +32,15 @@ class CodeIndexStore:
                 self._create_schema(conn, set_version=True)
             elif state == "v2":
                 self._migrate_v2_to_v3(conn)
+                self._migrate_v3_to_v4(conn)
+            elif state == "v3":
+                self._migrate_v3_to_v4(conn)
             else:
                 self._create_schema(conn, set_version=True)
 
     def has_fts5(self) -> bool:
         with self.connect() as conn:
             return supports_fts5(conn) and self._table_exists(conn, "code_chunks_fts")
-            self._create_schema(conn)
 
     def get_file(self, path: str) -> IndexedFile | None:
         with self.connect() as conn:
@@ -72,6 +77,11 @@ class CodeIndexStore:
             if self._table_exists(conn, "code_chunks_fts") and chunk_ids:
                 conn.executemany(
                     "delete from code_chunks_fts where chunk_id = ?",
+                    [(chunk_id,) for chunk_id in chunk_ids],
+                )
+            if self._table_exists(conn, "chunk_embeddings") and chunk_ids:
+                conn.executemany(
+                    "delete from chunk_embeddings where chunk_id = ?",
                     [(chunk_id,) for chunk_id in chunk_ids],
                 )
             conn.execute("delete from code_chunks where file_path = ?", (indexed_file.path,))
@@ -133,6 +143,14 @@ class CodeIndexStore:
                     "delete from code_chunks_fts where file_path = ?",
                     [(path,) for path in items],
                 )
+            if self._table_exists(conn, "chunk_embeddings"):
+                conn.executemany(
+                    """
+                    delete from chunk_embeddings
+                    where chunk_id in (select id from code_chunks where file_path = ?)
+                    """,
+                    [(path,) for path in items],
+                )
             conn.executemany(
                 "delete from indexed_files where path = ?",
                 [(path,) for path in items],
@@ -157,6 +175,7 @@ class CodeIndexStore:
             rows = conn.execute(
                 """
                 select
+                    c.id as chunk_id,
                     c.file_path,
                     c.start_line,
                     c.content,
@@ -187,6 +206,7 @@ class CodeIndexStore:
             rows = conn.execute(
                 """
                 select
+                    id as chunk_id,
                     file_path,
                     start_line,
                     content,
@@ -210,6 +230,149 @@ class CodeIndexStore:
                 (like, like, like, like, like, limit),
             ).fetchall()
             return [_dict(row) for row in rows]
+
+    def list_chunks(self) -> list[CodeChunk]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                select
+                    id, file_path, language, chunk_type, symbol_name, qualified_name,
+                    parent_symbol, start_line, end_line, content, content_hash,
+                    is_fallback, parse_status
+                from code_chunks
+                order by file_path, start_line, chunk_type, id
+                """
+            ).fetchall()
+        return [_chunk_from_row(row) for row in rows]
+
+    def get_embedding_hashes(self, profile_id: str) -> dict[str, str]:
+        if not self._has_vector_tables():
+            return {}
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                select chunk_id, embedding_input_hash
+                from chunk_embeddings
+                where profile_id = ?
+                """,
+                (profile_id,),
+            ).fetchall()
+        return {str(row[0]): str(row[1]) for row in rows}
+
+    def upsert_embedding_profile(self, profile: EmbeddingProfile) -> None:
+        with self.connect() as conn:
+            self._create_vector_tables(conn)
+            self._insert_profile(conn, profile)
+
+    def profile_exists(self, profile_id: str) -> bool:
+        if not self._has_vector_tables():
+            return False
+        with self.connect() as conn:
+            row = conn.execute(
+                "select id from embedding_profiles where id = ?",
+                (profile_id,),
+            ).fetchone()
+        return row is not None
+
+    def count_embeddings(self, profile_id: str) -> int:
+        if not self._has_vector_tables():
+            return 0
+        with self.connect() as conn:
+            row = conn.execute(
+                "select count(*) from chunk_embeddings where profile_id = ?",
+                (profile_id,),
+            ).fetchone()
+        return int(row[0] if row else 0)
+
+    def replace_embeddings(
+        self,
+        profile: EmbeddingProfile,
+        rows: Iterable[tuple[str, str, bytes]],
+    ) -> None:
+        items = list(rows)
+        with self.connect() as conn:
+            self._create_vector_tables(conn)
+            self._insert_profile(conn, profile)
+            now = datetime.now(UTC).isoformat()
+            conn.executemany(
+                """
+                insert or replace into chunk_embeddings(
+                    chunk_id, profile_id, embedding_input_hash, vector, created_at
+                )
+                values (?, ?, ?, ?, ?)
+                """,
+                [
+                    (chunk_id, profile.id, input_hash, vector, now)
+                    for chunk_id, input_hash, vector in items
+                ],
+            )
+
+    def delete_embeddings_for_chunks(self, chunk_ids: Iterable[str], profile_id: str) -> int:
+        items = list(chunk_ids)
+        if not items or not self._has_vector_tables():
+            return 0
+        with self.connect() as conn:
+            conn.executemany(
+                "delete from chunk_embeddings where chunk_id = ? and profile_id = ?",
+                [(chunk_id, profile_id) for chunk_id in items],
+            )
+        return len(items)
+
+    def search_vectors(
+        self,
+        query_vector: list[float],
+        *,
+        profile: EmbeddingProfile,
+        limit: int,
+    ) -> list[dict[str, object]]:
+        if not self._has_vector_tables():
+            return []
+        with self.connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                select
+                    c.id as chunk_id,
+                    c.file_path,
+                    c.start_line,
+                    c.content,
+                    c.content_hash,
+                    c.chunk_type,
+                    c.symbol_name,
+                    c.qualified_name,
+                    c.parent_symbol,
+                    c.is_fallback,
+                    e.vector,
+                    ? as embedding_profile,
+                    'vector' as backend
+                from chunk_embeddings e
+                join code_chunks c on c.id = e.chunk_id
+                where e.profile_id = ?
+                """,
+                (profile.id, profile.id),
+            ).fetchall()
+        scored: list[dict[str, object]] = []
+        for row in rows:
+            try:
+                vector = decode_vector(bytes(row["vector"]), dimensions=profile.dimensions)
+                score = cosine_similarity(query_vector, vector)
+            except (TypeError, VectorError):
+                continue
+            if score <= 0:
+                continue
+            item = _dict(row)
+            item.pop("vector", None)
+            item["vector_score"] = score
+            item["bm25_score"] = 0.0
+            scored.append(item)
+        scored.sort(
+            key=lambda item: (
+                -float(item["vector_score"]),
+                str(item["file_path"]),
+                int(item["start_line"]),
+            )
+        )
+        return scored[:limit]
 
     def schema_version(self) -> str | None:
         with self.connect() as conn:
@@ -239,14 +402,20 @@ class CodeIndexStore:
         version = str(row[0])
         if version == "2":
             return "v2"
+        if version == "3":
+            return "v3"
         if version != SCHEMA_VERSION:
             return "legacy"
         if supports_fts5(conn) and not self._table_exists(conn, "code_chunks_fts"):
             return "v2"
-        return "v3"
+        if not self._has_vector_tables(conn):
+            return "v3"
+        return "v4"
 
     def _drop_schema(self, conn: sqlite3.Connection) -> None:
         conn.execute("drop table if exists code_chunks_fts")
+        conn.execute("drop table if exists chunk_embeddings")
+        conn.execute("drop table if exists embedding_profiles")
         conn.execute("drop table if exists code_chunks")
         conn.execute("drop table if exists indexed_files")
         conn.execute("drop table if exists schema_metadata")
@@ -300,6 +469,7 @@ class CodeIndexStore:
         conn.execute("create index if not exists idx_code_chunks_type on code_chunks(chunk_type)")
         if supports_fts5(conn):
             self._create_fts_table(conn)
+        self._create_vector_tables(conn)
         if set_version:
             conn.execute(
                 """
@@ -324,6 +494,39 @@ class CodeIndexStore:
             """
         )
 
+    def _create_vector_tables(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            create table if not exists embedding_profiles (
+                id text primary key,
+                provider text not null,
+                model text not null,
+                dimensions integer not null,
+                input_version text not null,
+                vector_format text not null,
+                created_at text not null
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table if not exists chunk_embeddings (
+                chunk_id text not null references code_chunks(id) on delete cascade,
+                profile_id text not null references embedding_profiles(id) on delete cascade,
+                embedding_input_hash text not null,
+                vector blob not null,
+                created_at text not null,
+                primary key (chunk_id, profile_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            create index if not exists idx_chunk_embeddings_profile
+            on chunk_embeddings(profile_id)
+            """
+        )
+
     def _migrate_v2_to_v3(self, conn: sqlite3.Connection) -> None:
         self._create_schema(conn, set_version=False)
         if supports_fts5(conn):
@@ -338,25 +541,17 @@ class CodeIndexStore:
                 from code_chunks
                 """
             ).fetchall()
-            chunks = [
-                CodeChunk(
-                    id=str(row[0]),
-                    file_path=str(row[1]),
-                    language=str(row[2]),
-                    chunk_type=str(row[3]),
-                    symbol_name=row[4],
-                    qualified_name=row[5],
-                    parent_symbol=row[6],
-                    start_line=int(row[7]),
-                    end_line=int(row[8]),
-                    content=str(row[9]),
-                    content_hash=str(row[10]),
-                    is_fallback=bool(row[11]),
-                    parse_status=str(row[12]),
-                )
-                for row in rows
-            ]
+            chunks = [_chunk_from_row(row) for row in rows]
             self._insert_fts_rows(conn, chunks)
+        conn.execute(
+            """
+            insert or replace into schema_metadata(key, value)
+            values ('schema_version', '3')
+            """
+        )
+
+    def _migrate_v3_to_v4(self, conn: sqlite3.Connection) -> None:
+        self._create_vector_tables(conn)
         conn.execute(
             """
             insert or replace into schema_metadata(key, value)
@@ -386,12 +581,39 @@ class CodeIndexStore:
             ],
         )
 
+    def _insert_profile(self, conn: sqlite3.Connection, profile: EmbeddingProfile) -> None:
+        conn.execute(
+            """
+            insert or ignore into embedding_profiles(
+                id, provider, model, dimensions, input_version, vector_format, created_at
+            )
+            values (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                profile.id,
+                profile.provider,
+                profile.model,
+                profile.dimensions,
+                profile.input_version,
+                profile.vector_format,
+                datetime.now(UTC).isoformat(),
+            ),
+        )
+
     def _table_exists(self, conn: sqlite3.Connection, name: str) -> bool:
         row = conn.execute(
             "select name from sqlite_master where type = 'table' and name = ?",
             (name,),
         ).fetchone()
         return row is not None
+
+    def _has_vector_tables(self, conn: sqlite3.Connection | None = None) -> bool:
+        if conn is not None:
+            return self._table_exists(conn, "embedding_profiles") and self._table_exists(
+                conn, "chunk_embeddings"
+            )
+        with self.connect() as owned:
+            return self._has_vector_tables(owned)
 
 
 def supports_fts5(conn: sqlite3.Connection) -> bool:
@@ -401,6 +623,24 @@ def supports_fts5(conn: sqlite3.Connection) -> bool:
         return True
     except sqlite3.DatabaseError:
         return False
+
+
+def _chunk_from_row(row: sqlite3.Row | tuple[object, ...]) -> CodeChunk:
+    return CodeChunk(
+        id=str(row[0]),
+        file_path=str(row[1]),
+        language=str(row[2]),
+        chunk_type=str(row[3]),
+        symbol_name=row[4],
+        qualified_name=row[5],
+        parent_symbol=row[6],
+        start_line=int(row[7]),
+        end_line=int(row[8]),
+        content=str(row[9]),
+        content_hash=str(row[10]),
+        is_fallback=bool(row[11]),
+        parse_status=str(row[12]),
+    )
 
 
 def _dict(row: sqlite3.Row) -> dict[str, object]:

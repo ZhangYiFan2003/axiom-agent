@@ -1,0 +1,12 @@
+[
+  {"query": "find the sign-in validator", "expected_path": "app.py", "expected_symbol": "authenticate_user"},
+  {"query": "read application settings", "expected_path": "app.py", "expected_symbol": "load_user_config"},
+  {"query": "retrieve customer profile", "expected_path": "client.ts", "expected_symbol": "getUserProfile"},
+  {"query": "download account details", "expected_path": "client.ts", "expected_symbol": "fetchUser"},
+  {"query": "worker background job", "expected_path": "Service.java", "expected_symbol": "Worker"},
+  {"query": "build http client object", "expected_path": "client.ts", "expected_symbol": "buildClient"},
+  {"query": "validate user role", "expected_path": "app.py", "expected_symbol": "用户权限校验"},
+  {"query": "service salutation", "expected_path": "Service.java", "expected_symbol": "greet"},
+  {"query": "normalize account name", "expected_path": "client.ts", "expected_symbol": "normalizeUser"},
+  {"query": "application configuration loader", "expected_path": "app.py", "expected_symbol": "load_user_config"}
+]

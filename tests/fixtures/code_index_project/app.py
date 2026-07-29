@@ -14,6 +14,11 @@ def load_user_config(config_path: str) -> dict[str, str]:
     return {"path": config_path}
 
 
+def authenticate_user(username: str, password: str) -> bool:
+    """Validate login credentials for a sign-in request."""
+    return bool(username and password)
+
+
 def 用户权限校验(user_id: str) -> bool:
     """用户权限校验。"""
     return bool(user_id)

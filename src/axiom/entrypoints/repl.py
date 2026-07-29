@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
@@ -22,7 +23,8 @@ from axiom.llm import create_llm_client
 from axiom.memory import MemoryManager
 from axiom.policy import AuditLog
 from axiom.prompt import PromptAssembler
-from axiom.rag import CodeIndex
+from axiom.rag.code_index_factory import create_code_index
+from axiom.rag.embeddings import EmbeddingError
 from axiom.render import RichRenderer
 from axiom.runtime import DurableTaskManager
 from axiom.skill import SkillRegistry
@@ -207,18 +209,34 @@ async def _handle_slash(
             json.dumps(AuditLog(config.policy.audit_log_path).tail(limit), ensure_ascii=False)
         )
     elif command == "/index":
-        stats = CodeIndex(cwd).update(arg or ".")
+        index = create_code_index(cwd, config)
+        stats = await asyncio.to_thread(index.update, arg or ".")
         console.print(
             "Indexed "
             f"{stats.indexed_files} files, "
             f"{stats.unchanged_files} unchanged, "
             f"{stats.deleted_files} deleted, "
             f"{stats.failed_files} failed, "
-            f"{stats.chunk_count} chunks."
+            f"{stats.chunk_count} chunks, "
+            f"{stats.embedded_chunks} embedded, "
+            f"{stats.unchanged_embeddings} embeddings unchanged, "
+            f"{stats.failed_embeddings} embedding failures."
         )
     elif command == "/search":
-        results = CodeIndex(cwd).search(arg, limit=20)
-        output = "\n".join(f"{r.path}:{r.line}: {r.snippet}" for r in results)
+        index = create_code_index(cwd, config)
+        try:
+            results = await asyncio.to_thread(
+                index.search,
+                arg,
+                20,
+                mode=config.embedding.search_mode,
+            )
+        except EmbeddingError as exc:
+            console.print(f"[red]Embedding search unavailable:[/red] {exc}")
+            results = []
+        output = "\n".join(
+            f"{r.path}:{r.line}: {r.snippet} [{r.backend or 'lexical'}]" for r in results
+        )
         console.print(output or "(no matches)")
     elif command == "/plan":
         if not arg:

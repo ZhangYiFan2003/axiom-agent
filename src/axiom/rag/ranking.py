@@ -40,12 +40,17 @@ class RankedRow:
 
 
 def rank_rows(rows: list[dict[str, Any]], query: str, limit: int) -> list[CodeSearchResult]:
+    ranked = rank_candidate_rows(rows, query)
+    deduped = _dedupe_ranked(ranked)
+    return [_to_result(item) for item in deduped[:limit]]
+
+
+def rank_candidate_rows(rows: list[dict[str, Any]], query: str) -> list[RankedRow]:
     query_tokens = tokenize_query(query)
     normalized_query = normalize_text(query).replace(" ", "")
     ranked = [_rank_row(row, normalized_query, query_tokens) for row in rows]
     ranked.sort(key=lambda item: (-item.score, item.row["file_path"], item.row["start_line"]))
-    deduped = _dedupe_ranked(ranked)
-    return [_to_result(item) for item in deduped[:limit]]
+    return ranked
 
 
 def _rank_row(row: dict[str, Any], normalized_query: str, query_tokens: list[str]) -> RankedRow:
@@ -119,6 +124,8 @@ def _to_result(item: RankedRow) -> CodeSearchResult:
         score=item.score,
         backend=str(row.get("backend") or "like-fallback"),
         matched_fields=item.matched_fields,
+        lexical_score=item.score,
+        lexical_rank=int(row["lexical_rank"]) if row.get("lexical_rank") else None,
     )
 
 

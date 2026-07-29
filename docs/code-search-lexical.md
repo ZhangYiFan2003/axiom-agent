@@ -1,8 +1,9 @@
 # Lexical Code Search
 
 Stage 3B-1 upgrades code search from SQLite `LIKE` matching to offline
-FTS5/BM25 lexical retrieval over AST chunks. It does not add embeddings, vector
-similarity, semantic search, or call graph analysis.
+FTS5/BM25 lexical retrieval over AST chunks. Stage 3B-2 keeps this lexical
+channel and layers optional vector and hybrid search on top. Call graph analysis
+is still deferred.
 
 ## Tokenizer
 
@@ -30,7 +31,9 @@ Short code tokens such as `api`, `db`, `id`, and `http` are retained.
 
 ## SQLite Schema
 
-The code index schema is version `3`.
+The code index schema is version `4` after Stage 3B-2. Stage 3B-1 introduced
+the lexical FTS5 table in version `3`; version `4` keeps the lexical schema and
+adds optional vector tables.
 
 Tables:
 
@@ -38,6 +41,8 @@ Tables:
 - `indexed_files`
 - `code_chunks`
 - `code_chunks_fts`
+- `embedding_profiles`
+- `chunk_embeddings`
 
 `code_chunks_fts` is an FTS5 virtual table populated explicitly from
 `code_chunks`. It stores `chunk_id`, `file_path`, `chunk_type`, `symbol_name`,
@@ -60,6 +65,10 @@ place:
 
 Pre-v2 line-oriented schemas are still treated as legacy and rebuilt by dropping
 only code-index tables.
+
+Stage 3B-2 migrates version `3` to version `4` by adding vector tables without
+rebuilding AST chunks or FTS rows. Embeddings remain optional and disabled by
+default.
 
 ## Search Backend
 
@@ -115,7 +124,10 @@ This is a local relevance fixture, not a production performance benchmark.
 ## Current Limits
 
 - Search is lexical, not semantic.
-- There are no embeddings or vector fields.
+- Embeddings and vector fields are optional and disabled by default.
 - There is no hybrid vector ranking.
 - There is no symbol reference resolution or call graph.
+
+See [`code-search-vector.md`](code-search-vector.md) for the optional vector and
+hybrid search layer.
 - No latency claim is made in this stage.

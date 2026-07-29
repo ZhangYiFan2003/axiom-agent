@@ -215,13 +215,13 @@ def test_schema_version_4_migrates_v3_additively(tmp_path: Path) -> None:
 
     store = CodeIndexStore(db_path)
 
-    assert SCHEMA_VERSION == "4"
-    assert store.schema_version() == "4"
+    assert SCHEMA_VERSION == "5"
+    assert store.schema_version() == "5"
     assert rows(db_path, "select name from sqlite_master where name = 'embedding_profiles'")
     assert rows(db_path, "select name from sqlite_master where name = 'chunk_embeddings'")
     fts_count = rows(db_path, "select count(*) as count from code_chunks_fts")[0]["count"]
     assert fts_count == lexical_count
-    assert CodeIndexStore(db_path).schema_version() == "4"
+    assert CodeIndexStore(db_path).schema_version() == "5"
 
 
 def test_embedding_profile_and_input_text_are_stable() -> None:

@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from axiom.config import EmbeddingConfig
-from axiom.rag.chunker import chunk_source
+from axiom.rag.analysis import analyze_source
 from axiom.rag.embeddings import (
     EmbeddingError,
     EmbeddingProfile,
@@ -20,9 +20,16 @@ from axiom.rag.embeddings import (
 )
 from axiom.rag.hybrid import FusionWeights, reciprocal_rank_fusion, vector_results
 from axiom.rag.languages import SKIP_DIRS, detect_language, is_indexable
-from axiom.rag.models import CodeSearchResult, IndexedFile, IndexStats
+from axiom.rag.models import (
+    CodeSearchResult,
+    IndexedFile,
+    IndexStats,
+    SymbolDefinition,
+    SymbolReference,
+)
 from axiom.rag.ranking import rank_rows
 from axiom.rag.store import CodeIndexStore
+from axiom.rag.symbols.resolver import resolve_import_paths, resolve_references
 from axiom.rag.tokenizer import fts_match_query, tokenize_code_text, tokenize_query
 from axiom.rag.vectors import encode_vector, normalize_vector
 
@@ -69,7 +76,7 @@ class CodeIndex:
                     continue
 
                 source = file_path.read_text(encoding="utf-8", errors="ignore")
-                chunks, parse_status = chunk_source(rel, language, source)
+                analysis = analyze_source(rel, language, source)
                 indexed_file = IndexedFile(
                     path=rel,
                     language=language,
@@ -77,14 +84,19 @@ class CodeIndex:
                     size=stat.st_size,
                     mtime_ns=stat.st_mtime_ns,
                     indexed_at=datetime.now(UTC).isoformat(),
-                    parse_status=parse_status,
+                    parse_status=analysis.parse_status,
                 )
-                self.store.replace_file(indexed_file, chunks)
+                self.store.replace_file_analysis(indexed_file, analysis)
                 stats.indexed_files += 1
+                stats.parsed_files += 1
+                stats.definitions_updated += len(analysis.symbols)
+                stats.imports_updated += len(analysis.imports)
+                stats.references_extracted += len(analysis.references)
             except OSError:
                 stats.failed_files += 1
 
         stats.deleted_files = self.remove_missing_files(base, scanned_paths)
+        self._resolve_workspace_symbols(stats)
         if self.embedding_provider and self.search_config.enabled:
             self._merge_embedding_stats(stats, self.sync_embeddings())
         stats.chunk_count = self.store.count_chunks()
@@ -175,6 +187,58 @@ class CodeIndex:
         if selected_mode == "hybrid":
             return self._search_hybrid(query, limit)
         return self._search_auto(query, limit)
+
+    def find_definitions(
+        self,
+        name: str,
+        *,
+        file_path: str | None = None,
+        language: str | None = None,
+        limit: int = 20,
+    ) -> list[SymbolDefinition]:
+        return self.store.find_definitions(
+            name,
+            file_path=file_path,
+            language=language,
+            limit=limit,
+        )
+
+    def find_references(
+        self,
+        symbol_id_or_name: str,
+        *,
+        limit: int = 100,
+    ) -> list[SymbolReference]:
+        return self.store.find_references(symbol_id_or_name, limit=limit)
+
+    def resolve_symbol_at(
+        self,
+        file_path: str,
+        line: int,
+        column: int | None = None,
+    ) -> SymbolDefinition | None:
+        del column
+        rel = self._relative(self._resolve(file_path))
+        references = [
+            reference
+            for reference in self.store.list_symbol_references()
+            if reference.file_path == rel and reference.start_line <= line <= reference.end_line
+        ]
+        for reference in references:
+            if reference.resolved_symbol_id:
+                definitions = self.store.find_definitions(reference.name, limit=100)
+                for definition in definitions:
+                    if definition.id == reference.resolved_symbol_id:
+                        return definition
+        candidates = [
+            definition
+            for definition in self.store.list_symbol_definitions()
+            if definition.file_path == rel and definition.start_line <= line <= definition.end_line
+        ]
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (item.end_line - item.start_line, item.start_line))
+        return candidates[0]
 
     def _search_auto(self, query: str, limit: int) -> list[CodeSearchResult]:
         if not self.embedding_provider or not self.search_config.enabled:
@@ -284,6 +348,26 @@ class CodeIndex:
             if all(token in searchable for token in tokens):
                 filtered.append(row)
         return filtered
+
+    def _resolve_workspace_symbols(self, stats: IndexStats) -> None:
+        started = time.perf_counter()
+        definitions = self.store.list_symbol_definitions()
+        imports = self.store.list_import_bindings()
+        references = self.store.list_symbol_references()
+        file_paths = set(self.store.list_file_paths())
+        resolved_imports = resolve_import_paths(imports, file_paths)
+        resolved_references = resolve_references(definitions, resolved_imports, references)
+        self.store.replace_workspace_symbols(resolved_imports, resolved_references)
+        stats.references_resolved = sum(
+            1 for reference in resolved_references if reference.resolution_status == "resolved"
+        )
+        stats.references_unresolved = sum(
+            1 for reference in resolved_references if reference.resolution_status == "unresolved"
+        )
+        stats.references_ambiguous = sum(
+            1 for reference in resolved_references if reference.resolution_status == "ambiguous"
+        )
+        stats.resolution_duration_ms = (time.perf_counter() - started) * 1000
 
     def _profile_for_provider(
         self,

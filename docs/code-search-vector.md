@@ -74,7 +74,9 @@ stored vectors during search.
 
 ## SQLite Schema
 
-Schema version: `4`
+Schema version: `5` after Stage 3C-1. Stage 3B-2 introduced vector tables in
+version `4`; Stage 3C-1 adds symbol/import/reference tables without rebuilding
+vectors.
 
 Stage 3B-2 adds `embedding_profiles` and `chunk_embeddings`. Profile IDs are
 SHA256 hashes of provider, model, dimensions, embedding input version,
@@ -82,8 +84,9 @@ normalization version, and vector format. They do not include API keys, endpoint
 credentials, or source code.
 
 The v3 to v4 migration preserves `indexed_files`, `code_chunks`, and
-`code_chunks_fts`, then creates vector tables and marks `schema_version = 4`.
-Embedding tables may remain empty when embeddings are disabled.
+`code_chunks_fts`, then creates vector tables. The v4 to v5 migration preserves
+those vector tables and adds symbol tables. Embedding tables may remain empty
+when embeddings are disabled.
 
 ## Incremental Embedding
 

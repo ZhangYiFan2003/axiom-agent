@@ -5,12 +5,19 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 
+from axiom.rag.analysis import FileAnalysis
 from axiom.rag.embeddings import EmbeddingProfile
-from axiom.rag.models import CodeChunk, IndexedFile
+from axiom.rag.models import (
+    CodeChunk,
+    ImportBinding,
+    IndexedFile,
+    SymbolDefinition,
+    SymbolReference,
+)
 from axiom.rag.tokenizer import build_lexical_text
 from axiom.rag.vectors import VectorError, cosine_similarity, decode_vector
 
-SCHEMA_VERSION = "4"
+SCHEMA_VERSION = "5"
 
 
 class CodeIndexStore:
@@ -35,6 +42,9 @@ class CodeIndexStore:
                 self._migrate_v3_to_v4(conn)
             elif state == "v3":
                 self._migrate_v3_to_v4(conn)
+                self._migrate_v4_to_v5(conn)
+            elif state == "v4":
+                self._migrate_v4_to_v5(conn)
             else:
                 self._create_schema(conn, set_version=True)
 
@@ -65,7 +75,11 @@ class CodeIndexStore:
         )
 
     def replace_file(self, indexed_file: IndexedFile, chunks: Iterable[CodeChunk]) -> None:
-        chunk_items = list(chunks)
+        analysis = FileAnalysis(list(chunks), [], [], [], indexed_file.parse_status)
+        self.replace_file_analysis(indexed_file, analysis)
+
+    def replace_file_analysis(self, indexed_file: IndexedFile, analysis: FileAnalysis) -> None:
+        chunk_items = list(analysis.chunks)
         with self.connect() as conn:
             chunk_ids = [
                 str(row[0])
@@ -84,6 +98,7 @@ class CodeIndexStore:
                     "delete from chunk_embeddings where chunk_id = ?",
                     [(chunk_id,) for chunk_id in chunk_ids],
                 )
+            self._delete_symbol_rows(conn, indexed_file.path)
             conn.execute("delete from code_chunks where file_path = ?", (indexed_file.path,))
             conn.execute(
                 """
@@ -132,6 +147,8 @@ class CodeIndexStore:
             )
             if self._table_exists(conn, "code_chunks_fts"):
                 self._insert_fts_rows(conn, chunk_items)
+            if self._table_exists(conn, "symbol_definitions"):
+                self._insert_symbol_rows(conn, analysis)
 
     def delete_files(self, paths: Iterable[str]) -> int:
         items = list(paths)
@@ -151,6 +168,8 @@ class CodeIndexStore:
                     """,
                     [(path,) for path in items],
                 )
+            for path in items:
+                self._delete_symbol_rows(conn, path)
             conn.executemany(
                 "delete from indexed_files where path = ?",
                 [(path,) for path in items],
@@ -244,6 +263,125 @@ class CodeIndexStore:
                 """
             ).fetchall()
         return [_chunk_from_row(row) for row in rows]
+
+    def list_symbol_definitions(self) -> list[SymbolDefinition]:
+        if not self._has_symbol_tables():
+            return []
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                select
+                    id, file_path, language, symbol_kind, name, qualified_name,
+                    container_symbol_id, container_qualified_name, signature,
+                    start_line, end_line, chunk_id, exported, visibility, definition_hash
+                from symbol_definitions
+                order by file_path, start_line, qualified_name
+                """
+            ).fetchall()
+        return [_symbol_from_row(row) for row in rows]
+
+    def list_import_bindings(self) -> list[ImportBinding]:
+        if not self._has_symbol_tables():
+            return []
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                select
+                    id, file_path, language, module_name, imported_name, local_name,
+                    import_kind, relative_level, start_line, end_line, resolved_file_path,
+                    resolution_status
+                from import_bindings
+                order by file_path, start_line, local_name
+                """
+            ).fetchall()
+        return [_import_from_row(row) for row in rows]
+
+    def list_symbol_references(self) -> list[SymbolReference]:
+        if not self._has_symbol_tables():
+            return []
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                select
+                    id, file_path, language, reference_kind, name, qualifier,
+                    enclosing_symbol_id, enclosing_qualified_name, argument_count,
+                    start_line, end_line, resolved_symbol_id, resolution_status,
+                    resolution_confidence, resolution_reason
+                from symbol_references
+                order by file_path, start_line, name
+                """
+            ).fetchall()
+        return [_reference_from_row(row) for row in rows]
+
+    def replace_workspace_symbols(
+        self,
+        imports: Iterable[ImportBinding],
+        references: Iterable[SymbolReference],
+    ) -> None:
+        import_items = list(imports)
+        reference_items = list(references)
+        with self.connect() as conn:
+            if not self._has_symbol_tables(conn):
+                self._create_symbol_tables(conn)
+            conn.execute("delete from import_bindings")
+            conn.execute("delete from symbol_references")
+            self._insert_import_rows(conn, import_items)
+            self._insert_reference_rows(conn, reference_items)
+
+    def find_definitions(
+        self,
+        name: str,
+        *,
+        file_path: str | None = None,
+        language: str | None = None,
+        limit: int = 20,
+    ) -> list[SymbolDefinition]:
+        if not self._has_symbol_tables():
+            return []
+        clauses = ["name = ?"]
+        params: list[object] = [name]
+        if file_path:
+            clauses.append("file_path = ?")
+            params.append(file_path)
+        if language:
+            clauses.append("language = ?")
+            params.append(language)
+        params.append(limit)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                select
+                    id, file_path, language, symbol_kind, name, qualified_name,
+                    container_symbol_id, container_qualified_name, signature,
+                    start_line, end_line, chunk_id, exported, visibility, definition_hash
+                from symbol_definitions
+                where {" and ".join(clauses)}
+                order by file_path, start_line, qualified_name
+                limit ?
+                """,
+                tuple(params),
+            ).fetchall()
+        return [_symbol_from_row(row) for row in rows]
+
+    def find_references(self, symbol_id_or_name: str, *, limit: int = 100) -> list[SymbolReference]:
+        if not self._has_symbol_tables():
+            return []
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                select
+                    id, file_path, language, reference_kind, name, qualifier,
+                    enclosing_symbol_id, enclosing_qualified_name, argument_count,
+                    start_line, end_line, resolved_symbol_id, resolution_status,
+                    resolution_confidence, resolution_reason
+                from symbol_references
+                where resolved_symbol_id = ? or name = ?
+                order by file_path, start_line, name
+                limit ?
+                """,
+                (symbol_id_or_name, symbol_id_or_name, limit),
+            ).fetchall()
+        return [_reference_from_row(row) for row in rows]
 
     def get_embedding_hashes(self, profile_id: str) -> dict[str, str]:
         if not self._has_vector_tables():
@@ -404,16 +542,23 @@ class CodeIndexStore:
             return "v2"
         if version == "3":
             return "v3"
+        if version == "4":
+            return "v4"
         if version != SCHEMA_VERSION:
             return "legacy"
         if supports_fts5(conn) and not self._table_exists(conn, "code_chunks_fts"):
             return "v2"
         if not self._has_vector_tables(conn):
             return "v3"
-        return "v4"
+        if not self._has_symbol_tables(conn):
+            return "v4"
+        return "v5"
 
     def _drop_schema(self, conn: sqlite3.Connection) -> None:
         conn.execute("drop table if exists code_chunks_fts")
+        conn.execute("drop table if exists symbol_references")
+        conn.execute("drop table if exists import_bindings")
+        conn.execute("drop table if exists symbol_definitions")
         conn.execute("drop table if exists chunk_embeddings")
         conn.execute("drop table if exists embedding_profiles")
         conn.execute("drop table if exists code_chunks")
@@ -470,6 +615,7 @@ class CodeIndexStore:
         if supports_fts5(conn):
             self._create_fts_table(conn)
         self._create_vector_tables(conn)
+        self._create_symbol_tables(conn)
         if set_version:
             conn.execute(
                 """
@@ -555,6 +701,15 @@ class CodeIndexStore:
         conn.execute(
             """
             insert or replace into schema_metadata(key, value)
+            values ('schema_version', '4')
+            """,
+        )
+
+    def _migrate_v4_to_v5(self, conn: sqlite3.Connection) -> None:
+        self._create_symbol_tables(conn)
+        conn.execute(
+            """
+            insert or replace into schema_metadata(key, value)
             values ('schema_version', ?)
             """,
             (SCHEMA_VERSION,),
@@ -600,6 +755,207 @@ class CodeIndexStore:
             ),
         )
 
+    def _create_symbol_tables(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            create table if not exists symbol_definitions (
+                id text primary key,
+                file_path text not null references indexed_files(path) on delete cascade,
+                language text not null,
+                symbol_kind text not null,
+                name text not null,
+                qualified_name text not null,
+                container_symbol_id text,
+                container_qualified_name text,
+                signature text,
+                start_line integer not null,
+                end_line integer not null,
+                chunk_id text,
+                exported integer not null,
+                visibility text,
+                definition_hash text not null
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table if not exists import_bindings (
+                id text primary key,
+                file_path text not null references indexed_files(path) on delete cascade,
+                language text not null,
+                module_name text not null,
+                imported_name text,
+                local_name text,
+                import_kind text not null,
+                relative_level integer not null,
+                start_line integer not null,
+                end_line integer not null,
+                resolved_file_path text,
+                resolution_status text not null
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table if not exists symbol_references (
+                id text primary key,
+                file_path text not null references indexed_files(path) on delete cascade,
+                language text not null,
+                reference_kind text not null,
+                name text not null,
+                qualifier text,
+                enclosing_symbol_id text,
+                enclosing_qualified_name text,
+                argument_count integer,
+                start_line integer not null,
+                end_line integer not null,
+                resolved_symbol_id text,
+                resolution_status text not null,
+                resolution_confidence real not null,
+                resolution_reason text
+            )
+            """
+        )
+        for statement in [
+            "create index if not exists idx_symbol_def_file on symbol_definitions(file_path)",
+            "create index if not exists idx_symbol_def_name on symbol_definitions(name)",
+            (
+                "create index if not exists idx_symbol_def_qualified "
+                "on symbol_definitions(qualified_name)"
+            ),
+            "create index if not exists idx_symbol_def_kind on symbol_definitions(symbol_kind)",
+            "create index if not exists idx_import_file on import_bindings(file_path)",
+            "create index if not exists idx_import_module on import_bindings(module_name)",
+            "create index if not exists idx_import_local on import_bindings(local_name)",
+            "create index if not exists idx_ref_file on symbol_references(file_path)",
+            "create index if not exists idx_ref_name on symbol_references(name)",
+            (
+                "create index if not exists idx_ref_enclosing "
+                "on symbol_references(enclosing_symbol_id)"
+            ),
+            "create index if not exists idx_ref_resolved on symbol_references(resolved_symbol_id)",
+            "create index if not exists idx_ref_status on symbol_references(resolution_status)",
+        ]:
+            conn.execute(statement)
+
+    def _delete_symbol_rows(self, conn: sqlite3.Connection, file_path: str) -> None:
+        if not self._has_symbol_tables(conn):
+            return
+        conn.execute("delete from symbol_references where file_path = ?", (file_path,))
+        conn.execute("delete from import_bindings where file_path = ?", (file_path,))
+        conn.execute("delete from symbol_definitions where file_path = ?", (file_path,))
+
+    def _insert_symbol_rows(self, conn: sqlite3.Connection, analysis: FileAnalysis) -> None:
+        self._insert_definition_rows(conn, analysis.symbols)
+        self._insert_import_rows(conn, analysis.imports)
+        self._insert_reference_rows(conn, analysis.references)
+
+    def _insert_definition_rows(
+        self,
+        conn: sqlite3.Connection,
+        definitions: Iterable[SymbolDefinition],
+    ) -> None:
+        conn.executemany(
+            """
+            insert into symbol_definitions(
+                id, file_path, language, symbol_kind, name, qualified_name,
+                container_symbol_id, container_qualified_name, signature,
+                start_line, end_line, chunk_id, exported, visibility, definition_hash
+            )
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    item.id,
+                    item.file_path,
+                    item.language,
+                    item.symbol_kind,
+                    item.name,
+                    item.qualified_name,
+                    item.container_symbol_id,
+                    item.container_qualified_name,
+                    item.signature,
+                    item.start_line,
+                    item.end_line,
+                    item.chunk_id,
+                    int(item.exported),
+                    item.visibility,
+                    item.definition_hash,
+                )
+                for item in definitions
+            ],
+        )
+
+    def _insert_import_rows(
+        self,
+        conn: sqlite3.Connection,
+        imports: Iterable[ImportBinding],
+    ) -> None:
+        conn.executemany(
+            """
+            insert into import_bindings(
+                id, file_path, language, module_name, imported_name, local_name,
+                import_kind, relative_level, start_line, end_line, resolved_file_path,
+                resolution_status
+            )
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    item.id,
+                    item.file_path,
+                    item.language,
+                    item.module_name,
+                    item.imported_name,
+                    item.local_name,
+                    item.import_kind,
+                    item.relative_level,
+                    item.start_line,
+                    item.end_line,
+                    item.resolved_file_path,
+                    item.resolution_status,
+                )
+                for item in imports
+            ],
+        )
+
+    def _insert_reference_rows(
+        self,
+        conn: sqlite3.Connection,
+        references: Iterable[SymbolReference],
+    ) -> None:
+        conn.executemany(
+            """
+            insert into symbol_references(
+                id, file_path, language, reference_kind, name, qualifier,
+                enclosing_symbol_id, enclosing_qualified_name, argument_count,
+                start_line, end_line, resolved_symbol_id, resolution_status,
+                resolution_confidence, resolution_reason
+            )
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    item.id,
+                    item.file_path,
+                    item.language,
+                    item.reference_kind,
+                    item.name,
+                    item.qualifier,
+                    item.enclosing_symbol_id,
+                    item.enclosing_qualified_name,
+                    item.argument_count,
+                    item.start_line,
+                    item.end_line,
+                    item.resolved_symbol_id,
+                    item.resolution_status,
+                    item.resolution_confidence,
+                    item.resolution_reason,
+                )
+                for item in references
+            ],
+        )
+
     def _table_exists(self, conn: sqlite3.Connection, name: str) -> bool:
         row = conn.execute(
             "select name from sqlite_master where type = 'table' and name = ?",
@@ -614,6 +970,16 @@ class CodeIndexStore:
             )
         with self.connect() as owned:
             return self._has_vector_tables(owned)
+
+    def _has_symbol_tables(self, conn: sqlite3.Connection | None = None) -> bool:
+        if conn is not None:
+            return (
+                self._table_exists(conn, "symbol_definitions")
+                and self._table_exists(conn, "import_bindings")
+                and self._table_exists(conn, "symbol_references")
+            )
+        with self.connect() as owned:
+            return self._has_symbol_tables(owned)
 
 
 def supports_fts5(conn: sqlite3.Connection) -> bool:
@@ -640,6 +1006,63 @@ def _chunk_from_row(row: sqlite3.Row | tuple[object, ...]) -> CodeChunk:
         content_hash=str(row[10]),
         is_fallback=bool(row[11]),
         parse_status=str(row[12]),
+    )
+
+
+def _symbol_from_row(row: sqlite3.Row | tuple[object, ...]) -> SymbolDefinition:
+    return SymbolDefinition(
+        id=str(row[0]),
+        file_path=str(row[1]),
+        language=str(row[2]),
+        symbol_kind=str(row[3]),
+        name=str(row[4]),
+        qualified_name=str(row[5]),
+        container_symbol_id=row[6],
+        container_qualified_name=row[7],
+        signature=row[8],
+        start_line=int(row[9]),
+        end_line=int(row[10]),
+        chunk_id=row[11],
+        exported=bool(row[12]),
+        visibility=row[13],
+        definition_hash=str(row[14]),
+    )
+
+
+def _import_from_row(row: sqlite3.Row | tuple[object, ...]) -> ImportBinding:
+    return ImportBinding(
+        id=str(row[0]),
+        file_path=str(row[1]),
+        language=str(row[2]),
+        module_name=str(row[3]),
+        imported_name=row[4],
+        local_name=row[5],
+        import_kind=str(row[6]),
+        relative_level=int(row[7]),
+        start_line=int(row[8]),
+        end_line=int(row[9]),
+        resolved_file_path=row[10],
+        resolution_status=str(row[11]),
+    )
+
+
+def _reference_from_row(row: sqlite3.Row | tuple[object, ...]) -> SymbolReference:
+    return SymbolReference(
+        id=str(row[0]),
+        file_path=str(row[1]),
+        language=str(row[2]),
+        reference_kind=str(row[3]),
+        name=str(row[4]),
+        qualifier=row[5],
+        enclosing_symbol_id=row[6],
+        enclosing_qualified_name=row[7],
+        argument_count=int(row[8]) if row[8] is not None else None,
+        start_line=int(row[9]),
+        end_line=int(row[10]),
+        resolved_symbol_id=row[11],
+        resolution_status=str(row[12]),
+        resolution_confidence=float(row[13]),
+        resolution_reason=row[14],
     )
 
 

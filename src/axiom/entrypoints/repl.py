@@ -45,6 +45,8 @@ SLASH_COMMANDS = [
     "/audit",
     "/index",
     "/search",
+    "/symbol",
+    "/references",
     "/plan",
     "/team",
     "/model",
@@ -218,6 +220,10 @@ async def _handle_slash(
             f"{stats.deleted_files} deleted, "
             f"{stats.failed_files} failed, "
             f"{stats.chunk_count} chunks, "
+            f"{stats.definitions_updated} definitions, "
+            f"{stats.imports_updated} imports, "
+            f"{stats.references_extracted} references, "
+            f"{stats.references_resolved} resolved, "
             f"{stats.embedded_chunks} embedded, "
             f"{stats.unchanged_embeddings} embeddings unchanged, "
             f"{stats.failed_embeddings} embedding failures."
@@ -238,6 +244,31 @@ async def _handle_slash(
             f"{r.path}:{r.line}: {r.snippet} [{r.backend or 'lexical'}]" for r in results
         )
         console.print(output or "(no matches)")
+    elif command == "/symbol":
+        if not arg:
+            console.print("[red]Usage:[/red] /symbol <name>")
+        else:
+            index = create_code_index(cwd, config)
+            definitions = await asyncio.to_thread(index.find_definitions, arg, limit=20)
+            output = "\n".join(
+                f"{item.file_path}:{item.start_line}: "
+                f"{item.symbol_kind} {item.qualified_name}"
+                for item in definitions
+            )
+            console.print(output or "(no symbols)")
+    elif command == "/references":
+        if not arg:
+            console.print("[red]Usage:[/red] /references <name-or-symbol-id>")
+        else:
+            index = create_code_index(cwd, config)
+            references = await asyncio.to_thread(index.find_references, arg, limit=50)
+            output = "\n".join(
+                f"{item.file_path}:{item.start_line}: "
+                f"{item.reference_kind} {item.qualifier + '.' if item.qualifier else ''}"
+                f"{item.name} [{item.resolution_status}]"
+                for item in references
+            )
+            console.print(output or "(no references)")
     elif command == "/plan":
         if not arg:
             console.print("[red]Usage:[/red] /plan <task>")

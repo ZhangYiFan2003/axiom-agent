@@ -31,9 +31,9 @@ Short code tokens such as `api`, `db`, `id`, and `http` are retained.
 
 ## SQLite Schema
 
-The code index schema is version `4` after Stage 3B-2. Stage 3B-1 introduced
-the lexical FTS5 table in version `3`; version `4` keeps the lexical schema and
-adds optional vector tables.
+The code index schema is version `5` after Stage 3C-1. Stage 3B-1 introduced
+the lexical FTS5 table in version `3`; version `4` added optional vector tables;
+version `5` adds symbol/import/reference tables.
 
 Tables:
 
@@ -43,6 +43,9 @@ Tables:
 - `code_chunks_fts`
 - `embedding_profiles`
 - `chunk_embeddings`
+- `symbol_definitions`
+- `import_bindings`
+- `symbol_references`
 
 `code_chunks_fts` is an FTS5 virtual table populated explicitly from
 `code_chunks`. It stores `chunk_id`, `file_path`, `chunk_type`, `symbol_name`,
@@ -67,8 +70,9 @@ Pre-v2 line-oriented schemas are still treated as legacy and rebuilt by dropping
 only code-index tables.
 
 Stage 3B-2 migrates version `3` to version `4` by adding vector tables without
-rebuilding AST chunks or FTS rows. Embeddings remain optional and disabled by
-default.
+rebuilding AST chunks or FTS rows. Stage 3C-1 migrates version `4` to version
+`5` by adding symbol/import/reference tables. Embeddings remain optional and
+disabled by default.
 
 ## Search Backend
 

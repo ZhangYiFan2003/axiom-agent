@@ -222,6 +222,35 @@ def get_builtin_tools() -> list[Tool]:
             handler=search_code,
         ),
         Tool(
+            name="find_symbol",
+            description="Find static symbol definitions in the current workspace code index.",
+            parameters=object_schema(
+                {
+                    "name": {"type": "string", "description": "Symbol name"},
+                    "limit": {"type": "number", "description": "Maximum matches"},
+                },
+                ["name"],
+            ),
+            required_keys=["name"],
+            handler=find_symbol,
+        ),
+        Tool(
+            name="find_references",
+            description=(
+                "Find indexed static symbol references by symbol id or name. "
+                "Does not perform call graph or call-chain analysis."
+            ),
+            parameters=object_schema(
+                {
+                    "symbol": {"type": "string", "description": "Symbol id or name"},
+                    "limit": {"type": "number", "description": "Maximum matches"},
+                },
+                ["symbol"],
+            ),
+            required_keys=["symbol"],
+            handler=find_references,
+        ),
+        Tool(
             name="revert_turn",
             description=(
                 "Restore the workspace to a previous Axiom Agent Runtime "
@@ -419,6 +448,44 @@ async def search_code(payload: dict[str, Any], context: ToolContext) -> ToolResu
     return ToolResult(
         "\n".join(f"{item.path}:{item.line}: {item.snippet}" for item in results),
         display_summary=f"code search: {backend}",
+    )
+
+
+async def find_symbol(payload: dict[str, Any], context: ToolContext) -> ToolResult:
+    index = create_code_index(context.cwd, context.config)
+    definitions = await asyncio.to_thread(
+        index.find_definitions,
+        str(payload["name"]),
+        limit=int(payload.get("limit") or 20),
+    )
+    if not definitions:
+        return ToolResult("(no symbols; run /index first)")
+    return ToolResult(
+        "\n".join(
+            f"{item.file_path}:{item.start_line}: {item.symbol_kind} {item.qualified_name}"
+            for item in definitions
+        ),
+        display_summary=f"symbols: {len(definitions)}",
+    )
+
+
+async def find_references(payload: dict[str, Any], context: ToolContext) -> ToolResult:
+    index = create_code_index(context.cwd, context.config)
+    references = await asyncio.to_thread(
+        index.find_references,
+        str(payload["symbol"]),
+        limit=int(payload.get("limit") or 100),
+    )
+    if not references:
+        return ToolResult("(no references; run /index first)")
+    return ToolResult(
+        "\n".join(
+            f"{item.file_path}:{item.start_line}: {item.reference_kind} "
+            f"{item.qualifier + '.' if item.qualifier else ''}{item.name} "
+            f"[{item.resolution_status}]"
+            for item in references
+        ),
+        display_summary=f"references: {len(references)}",
     )
 
 

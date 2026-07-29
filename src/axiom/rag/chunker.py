@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from tree_sitter import Node
+from tree_sitter import Node, Tree
 
 from axiom.rag.languages import is_ast_language
 from axiom.rag.models import CodeChunk
@@ -20,6 +20,16 @@ def chunk_source(file_path: str, language: str, source: str) -> tuple[list[CodeC
     except Exception:
         return [_file_chunk(file_path, language, source, "parse_error", True)], "parse_error"
 
+    return chunk_tree(file_path, language, source, source_bytes, tree)
+
+
+def chunk_tree(
+    file_path: str,
+    language: str,
+    source: str,
+    source_bytes: bytes,
+    tree: Tree,
+) -> tuple[list[CodeChunk], str]:
     parse_status = "parsed_with_errors" if tree.root_node.has_error else "parsed"
     chunks = [_file_chunk(file_path, language, source, parse_status, False)]
     chunks.extend(_walk_language(language, tree.root_node, source_bytes, file_path, parse_status))

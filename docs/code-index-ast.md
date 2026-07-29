@@ -43,9 +43,9 @@ Other indexable text files are stored as fallback file chunks with
 
 ## SQLite Schema
 
-The AST schema was introduced as version `2`. Later lexical and vector search
-stages migrate the same code index database to version `4` without changing the
-AST chunk model.
+The AST schema was introduced as version `2`. Later lexical, vector, and static
+symbol stages migrate the same code index database to version `5` without
+changing the AST chunk model.
 
 `indexed_files` stores file-level metadata:
 

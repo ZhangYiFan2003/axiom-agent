@@ -31,9 +31,10 @@ Short code tokens such as `api`, `db`, `id`, and `http` are retained.
 
 ## SQLite Schema
 
-The code index schema is version `5` after Stage 3C-1. Stage 3B-1 introduced
+The code index schema is version `6` after Stage 3C-2. Stage 3B-1 introduced
 the lexical FTS5 table in version `3`; version `4` added optional vector tables;
-version `5` adds symbol/import/reference tables.
+version `5` adds symbol/import/reference tables; version `6` adds static call
+edges.
 
 Tables:
 
@@ -130,7 +131,8 @@ This is a local relevance fixture, not a production performance benchmark.
 - Search is lexical, not semantic.
 - Embeddings and vector fields are optional and disabled by default.
 - There is no hybrid vector ranking.
-- There is no symbol reference resolution or call graph.
+- Lexical ranking is separate from symbol resolution and static call graph
+  construction.
 
 See [`code-search-vector.md`](code-search-vector.md) for the optional vector and
 hybrid search layer.

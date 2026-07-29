@@ -1,8 +1,9 @@
 # Vector and Hybrid Code Search
 
 Stage 3B-2 adds optional vector storage and hybrid ranking on top of the AST and
-FTS5 lexical index. It does not add call graph analysis, cross-file reference
-resolution, ANN indexing, or production semantic accuracy claims.
+FTS5 lexical index. Later symbol and call-graph stages are separate from vector
+ranking. This document does not make ANN indexing or production semantic
+accuracy claims.
 
 ## Provider Model
 
@@ -74,9 +75,9 @@ stored vectors during search.
 
 ## SQLite Schema
 
-Schema version: `5` after Stage 3C-1. Stage 3B-2 introduced vector tables in
-version `4`; Stage 3C-1 adds symbol/import/reference tables without rebuilding
-vectors.
+Schema version: `6` after Stage 3C-2. Stage 3B-2 introduced vector tables in
+version `4`; Stage 3C-1 adds symbol/import/reference tables, and Stage 3C-2
+adds call-edge tables without rebuilding vectors.
 
 Stage 3B-2 adds `embedding_profiles` and `chunk_embeddings`. Profile IDs are
 SHA256 hashes of provider, model, dimensions, embedding input version,
@@ -85,7 +86,8 @@ credentials, or source code.
 
 The v3 to v4 migration preserves `indexed_files`, `code_chunks`, and
 `code_chunks_fts`, then creates vector tables. The v4 to v5 migration preserves
-those vector tables and adds symbol tables. Embedding tables may remain empty
+those vector tables and adds symbol tables. The v5 to v6 migration preserves
+vectors and symbols and adds call-edge tables. Embedding tables may remain empty
 when embeddings are disabled.
 
 ## Incremental Embedding
@@ -152,7 +154,7 @@ paraphrase-oriented.
 
 - No ANN index.
 - No NumPy or native vector extension dependency.
-- No call graph or reference resolution.
+- No ANN/vector acceleration.
 - No production semantic accuracy claim.
 - Full vector scan is acceptable for the current project scale but will need an
   optional acceleration path for larger corpora.

@@ -43,9 +43,9 @@ Other indexable text files are stored as fallback file chunks with
 
 ## SQLite Schema
 
-The AST schema was introduced as version `2`. Later lexical, vector, and static
-symbol stages migrate the same code index database to version `5` without
-changing the AST chunk model.
+The AST schema was introduced as version `2`. Later lexical, vector, static
+symbol, and static call-graph stages migrate the same code index database to
+version `6` without changing the AST chunk model.
 
 `indexed_files` stores file-level metadata:
 
@@ -133,8 +133,8 @@ The following are intentionally out of scope for Stage 3A:
 - vector similarity
 - lexical/vector hybrid retrieval
 - symbol reference resolution
-- caller/callee analysis
-- static call graph construction
+- runtime caller/callee dispatch analysis
+- runtime call graph construction
 - Playwright integration
 - Memory v2
 

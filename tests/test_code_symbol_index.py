@@ -164,11 +164,11 @@ def test_schema_v5_migrates_from_v4_without_dropping_lexical_or_vectors(tmp_path
 
     store = CodeIndexStore(db_path)
 
-    assert SCHEMA_VERSION == "5"
-    assert store.schema_version() == "5"
+    assert SCHEMA_VERSION == "6"
+    assert store.schema_version() == "6"
     assert rows(db_path, "select name from sqlite_master where name = 'symbol_definitions'")
     assert rows(db_path, "select count(*) as count from code_chunks_fts")[0]["count"] == fts_count
-    assert CodeIndexStore(db_path).schema_version() == "5"
+    assert CodeIndexStore(db_path).schema_version() == "6"
 
 
 def test_incremental_symbol_update_delete_and_resolution_recovery(tmp_path: Path) -> None:

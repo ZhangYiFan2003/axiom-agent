@@ -251,6 +251,66 @@ def get_builtin_tools() -> list[Tool]:
             handler=find_references,
         ),
         Tool(
+            name="find_callers",
+            description=(
+                "Find direct callers from the static high-confidence call graph. "
+                "This is not a complete runtime call graph."
+            ),
+            parameters=object_schema(
+                {
+                    "symbol": {"type": "string", "description": "Symbol id or unique name"},
+                    "limit": {"type": "number", "description": "Maximum matches"},
+                },
+                ["symbol"],
+            ),
+            required_keys=["symbol"],
+            handler=find_callers,
+        ),
+        Tool(
+            name="find_callees",
+            description=(
+                "Find direct callees from the static high-confidence call graph. "
+                "This is not a complete runtime call graph."
+            ),
+            parameters=object_schema(
+                {
+                    "symbol": {"type": "string", "description": "Symbol id or unique name"},
+                    "limit": {"type": "number", "description": "Maximum matches"},
+                },
+                ["symbol"],
+            ),
+            required_keys=["symbol"],
+            handler=find_callees,
+        ),
+        Tool(
+            name="trace_call_chain",
+            description=(
+                "Trace bounded paths in the static high-confidence call graph. "
+                "Dynamic and ambiguous calls are excluded."
+            ),
+            parameters=object_schema(
+                {
+                    "symbol": {"type": "string", "description": "Symbol id or unique name"},
+                    "direction": {"type": "string", "description": "outgoing or incoming"},
+                    "max_depth": {"type": "number", "description": "Maximum depth"},
+                    "max_paths": {"type": "number", "description": "Maximum paths"},
+                },
+                ["symbol"],
+            ),
+            required_keys=["symbol"],
+            handler=trace_call_chain,
+        ),
+        Tool(
+            name="find_recursive_components",
+            description="Find recursive components in the static high-confidence call graph.",
+            parameters=object_schema(
+                {"limit": {"type": "number", "description": "Maximum components"}},
+                [],
+            ),
+            required_keys=[],
+            handler=find_recursive_components,
+        ),
+        Tool(
             name="revert_turn",
             description=(
                 "Restore the workspace to a previous Axiom Agent Runtime "
@@ -487,6 +547,109 @@ async def find_references(payload: dict[str, Any], context: ToolContext) -> Tool
         ),
         display_summary=f"references: {len(references)}",
     )
+
+
+async def find_callers(payload: dict[str, Any], context: ToolContext) -> ToolResult:
+    index = create_code_index(context.cwd, context.config)
+    try:
+        edges = await asyncio.to_thread(
+            index.find_callers,
+            str(payload["symbol"]),
+            limit=int(payload.get("limit") or 20),
+        )
+    except ValueError as exc:
+        return ToolResult(_format_lookup_error(exc), is_error=True)
+    return _call_edge_result(index, edges, "callers")
+
+
+async def find_callees(payload: dict[str, Any], context: ToolContext) -> ToolResult:
+    index = create_code_index(context.cwd, context.config)
+    try:
+        edges = await asyncio.to_thread(
+            index.find_callees,
+            str(payload["symbol"]),
+            limit=int(payload.get("limit") or 20),
+        )
+    except ValueError as exc:
+        return ToolResult(_format_lookup_error(exc), is_error=True)
+    return _call_edge_result(index, edges, "callees")
+
+
+async def trace_call_chain(payload: dict[str, Any], context: ToolContext) -> ToolResult:
+    index = create_code_index(context.cwd, context.config)
+    try:
+        result = await asyncio.to_thread(
+            index.trace_call_paths,
+            str(payload["symbol"]),
+            direction=str(payload.get("direction") or "outgoing"),
+            max_depth=int(payload.get("max_depth") or 3),
+            max_paths=int(payload.get("max_paths") or 50),
+        )
+    except ValueError as exc:
+        return ToolResult(_format_lookup_error(exc), is_error=True)
+    definitions = {item.id: item for item in index.store.list_symbol_definitions()}
+    rows = []
+    for path in result.paths:
+        labels = [
+            definitions[symbol_id].qualified_name
+            if symbol_id in definitions
+            else symbol_id[:12]
+            for symbol_id in path.symbol_ids
+        ]
+        rows.append(" -> ".join(labels) + (" [cycle]" if path.cycle else ""))
+    if result.truncated:
+        rows.append("[truncated]")
+    return ToolResult("\n".join(rows) or "(no call paths)", display_summary="call chain")
+
+
+async def find_recursive_components(
+    payload: dict[str, Any],
+    context: ToolContext,
+) -> ToolResult:
+    index = create_code_index(context.cwd, context.config)
+    limit = int(payload.get("limit") or 20)
+    components = await asyncio.to_thread(index.find_recursive_components)
+    definitions = {item.id: item for item in index.store.list_symbol_definitions()}
+    rows = []
+    for component in components[:limit]:
+        names = [
+            definitions[symbol_id].qualified_name
+            if symbol_id in definitions
+            else symbol_id[:12]
+            for symbol_id in component.symbol_ids
+        ]
+        rows.append(f"{component.recursion_kind}: " + " <-> ".join(names))
+    return ToolResult(
+        "\n".join(rows) or "(no recursive components)",
+        display_summary=f"recursive components: {len(rows)}",
+    )
+
+
+def _call_edge_result(index, edges, label: str) -> ToolResult:
+    definitions = {item.id: item for item in index.store.list_symbol_definitions()}
+    rows = []
+    for edge in edges:
+        caller = definitions.get(edge.caller_symbol_id)
+        callee = definitions.get(edge.callee_symbol_id)
+        if not caller or not callee:
+            continue
+        rows.append(
+            f"{edge.file_path}:{edge.start_line}: "
+            f"{caller.qualified_name} -> {callee.qualified_name}"
+        )
+    return ToolResult("\n".join(rows) or f"(no {label})", display_summary=f"{label}: {len(rows)}")
+
+
+def _format_lookup_error(exc: ValueError) -> str:
+    candidates = getattr(exc, "candidates", ())
+    if not candidates:
+        return str(exc)
+    rows = [str(exc), "Candidates:"]
+    rows.extend(
+        f"{item.file_path}:{item.start_line}: {item.qualified_name} [{item.id[:12]}]"
+        for item in candidates
+    )
+    return "\n".join(rows)
 
 
 async def revert_turn(payload: dict[str, Any], context: ToolContext) -> ToolResult:

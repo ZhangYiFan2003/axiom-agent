@@ -47,6 +47,10 @@ SLASH_COMMANDS = [
     "/search",
     "/symbol",
     "/references",
+    "/callers",
+    "/callees",
+    "/callchain",
+    "/recursive",
     "/plan",
     "/team",
     "/model",
@@ -269,6 +273,49 @@ async def _handle_slash(
                 for item in references
             )
             console.print(output or "(no references)")
+    elif command == "/callers":
+        if not arg:
+            console.print("[red]Usage:[/red] /callers <name-or-symbol-id>")
+        else:
+            index = create_code_index(cwd, config)
+            try:
+                edges = await asyncio.to_thread(index.find_callers, arg, limit=50)
+            except ValueError as exc:
+                console.print(str(exc))
+                edges = []
+            console.print(_format_edges(index, edges, incoming=True) or "(no callers)")
+    elif command == "/callees":
+        if not arg:
+            console.print("[red]Usage:[/red] /callees <name-or-symbol-id>")
+        else:
+            index = create_code_index(cwd, config)
+            try:
+                edges = await asyncio.to_thread(index.find_callees, arg, limit=50)
+            except ValueError as exc:
+                console.print(str(exc))
+                edges = []
+            console.print(_format_edges(index, edges, incoming=False) or "(no callees)")
+    elif command == "/callchain":
+        if not arg:
+            console.print("[red]Usage:[/red] /callchain <name-or-symbol-id> [depth]")
+        else:
+            symbol, _, depth_text = arg.partition(" ")
+            depth = int(depth_text) if depth_text.isdigit() else 3
+            index = create_code_index(cwd, config)
+            try:
+                result = await asyncio.to_thread(
+                    index.trace_call_paths,
+                    symbol,
+                    max_depth=depth,
+                    max_paths=50,
+                )
+                console.print(_format_paths(index, result) or "(no call paths)")
+            except ValueError as exc:
+                console.print(str(exc))
+    elif command == "/recursive":
+        index = create_code_index(cwd, config)
+        components = await asyncio.to_thread(index.find_recursive_components)
+        console.print(_format_recursive(index, components) or "(no recursive components)")
     elif command == "/plan":
         if not arg:
             console.print("[red]Usage:[/red] /plan <task>")
@@ -409,6 +456,54 @@ def _task_command(arg: str, console: Console) -> None:
             "\n".join(f"{task.id} {task.status} {task.prompt[:80]}" for task in rows)
             or "(no tasks)"
         )
+
+
+def _format_edges(index, edges, *, incoming: bool) -> str:
+    definitions = {item.id: item for item in index.store.list_symbol_definitions()}
+    rows = []
+    for edge in edges:
+        caller = definitions.get(edge.caller_symbol_id)
+        callee = definitions.get(edge.callee_symbol_id)
+        if not caller or not callee:
+            continue
+        source = caller if incoming else callee
+        rows.append(
+            f"{edge.file_path}:{edge.start_line}: "
+            f"{caller.qualified_name} -> {callee.qualified_name} "
+            f"({source.file_path}:{source.start_line})"
+        )
+    return "\n".join(rows)
+
+
+def _format_paths(index, result) -> str:
+    definitions = {item.id: item for item in index.store.list_symbol_definitions()}
+    rows = []
+    for path in result.paths:
+        labels = [
+            definitions[symbol_id].qualified_name
+            if symbol_id in definitions
+            else symbol_id[:12]
+            for symbol_id in path.symbol_ids
+        ]
+        suffix = " [cycle]" if path.cycle else ""
+        rows.append(" -> ".join(labels) + suffix)
+    if result.truncated:
+        rows.append("[truncated]")
+    return "\n".join(rows)
+
+
+def _format_recursive(index, components) -> str:
+    definitions = {item.id: item for item in index.store.list_symbol_definitions()}
+    rows = []
+    for component in components:
+        names = [
+            definitions[symbol_id].qualified_name
+            if symbol_id in definitions
+            else symbol_id[:12]
+            for symbol_id in component.symbol_ids
+        ]
+        rows.append(f"{component.recursion_kind}: " + " <-> ".join(names))
+    return "\n".join(rows)
 
 
 def _snapshot_command(arg: str, console: Console, cwd: str) -> None:

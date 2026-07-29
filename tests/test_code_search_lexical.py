@@ -77,7 +77,7 @@ def test_schema_version_5_and_fts_table_are_created(tmp_path: Path) -> None:
     CodeIndex(project, db_path=db_path).update()
 
     assert CodeIndexStore(db_path).schema_version() == SCHEMA_VERSION
-    assert SCHEMA_VERSION == "5"
+    assert SCHEMA_VERSION == "6"
     assert rows(
         db_path,
         "select name from sqlite_master where type = 'table' and name = 'code_chunks_fts'",
@@ -187,8 +187,8 @@ def test_schema_v2_migrates_in_place_without_reparsing(tmp_path: Path) -> None:
     store = CodeIndexStore(db_path)
     store_again = CodeIndexStore(db_path)
 
-    assert store.schema_version() == "5"
-    assert store_again.schema_version() == "5"
+    assert store.schema_version() == "6"
+    assert store_again.schema_version() == "6"
     assert rows(db_path, "select id from code_chunks where id = 'chunk-1'")
     assert rows(db_path, "select chunk_id from code_chunks_fts where chunk_id = 'chunk-1'")
 
@@ -211,7 +211,7 @@ def test_pre_v2_legacy_schema_rebuilds_to_v3(tmp_path: Path) -> None:
 
     index = CodeIndex(project, db_path=db_path)
 
-    assert index.store.schema_version() == "5"
+    assert index.store.schema_version() == "6"
     columns = {row["name"] for row in rows(db_path, "pragma table_info(code_chunks)")}
     assert "file_path" in columns
     assert "root" not in columns
@@ -288,7 +288,7 @@ def test_like_fallback_when_fts5_is_unavailable(
     index = CodeIndex(project, db_path=tmp_path / "index.sqlite3")
     index.update()
 
-    assert index.store.schema_version() == "5"
+    assert index.store.schema_version() == "6"
     results = index.search("load user config", limit=5)
     assert results
     assert results[0].symbol_name == "load_user_config"

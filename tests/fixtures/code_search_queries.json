@@ -1,0 +1,17 @@
+[
+  {"query": "Greeter", "expected_path": "app.py", "expected_symbol": "Greeter"},
+  {"query": "greet", "expected_path": "app.py", "expected_symbol": "greet"},
+  {"query": "load user", "expected_path": "app.py", "expected_symbol": "load_user"},
+  {"query": "load user config", "expected_path": "app.py", "expected_symbol": "load_user_config"},
+  {"query": "用户权限校验", "expected_path": "app.py", "expected_symbol": "用户权限校验"},
+  {"query": "用户 权限", "expected_path": "app.py", "expected_symbol": "用户权限校验"},
+  {"query": "Service", "expected_path": "Service.java", "expected_symbol": "Service"},
+  {"query": "Service greet", "expected_path": "Service.java", "expected_symbol": "greet"},
+  {"query": "Worker", "expected_path": "Service.java", "expected_symbol": "Worker"},
+  {"query": "ApiClient", "expected_path": "client.ts", "expected_symbol": "ApiClient"},
+  {"query": "fetch user", "expected_path": "client.ts", "expected_symbol": "fetchUser"},
+  {"query": "normalize user", "expected_path": "client.ts", "expected_symbol": "normalizeUser"},
+  {"query": "build client", "expected_path": "client.ts", "expected_symbol": "buildClient"},
+  {"query": "get user profile", "expected_path": "client.ts", "expected_symbol": "getUserProfile"},
+  {"query": "client ts", "expected_path": "client.ts", "expected_symbol": "client.ts"}
+]

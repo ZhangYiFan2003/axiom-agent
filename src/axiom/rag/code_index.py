@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import sqlite3
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -8,7 +9,9 @@ from pathlib import Path
 from axiom.rag.chunker import chunk_source
 from axiom.rag.languages import SKIP_DIRS, detect_language, is_indexable
 from axiom.rag.models import CodeSearchResult, IndexedFile, IndexStats
+from axiom.rag.ranking import rank_rows
 from axiom.rag.store import CodeIndexStore
+from axiom.rag.tokenizer import fts_match_query, tokenize_code_text, tokenize_query
 
 
 class CodeIndex:
@@ -87,37 +90,19 @@ class CodeIndex:
         return self.store.delete_files(missing)
 
     def search(self, query: str, limit: int = 20) -> list[CodeSearchResult]:
-        terms = [term.lower() for term in query.split() if term.strip()]
-        if not terms:
+        tokens = tokenize_query(query)
+        if not tokens:
             return []
 
-        rows = self.store.search_rows(terms[0], limit=500)
-        results: list[CodeSearchResult] = []
-        for row in rows:
-            searchable = " ".join(
-                [
-                    str(row["content"]),
-                    str(row["symbol_name"] or ""),
-                    str(row["qualified_name"] or ""),
-                    str(row["chunk_type"] or ""),
-                ]
-            ).lower()
-            if not all(term in searchable for term in terms):
-                continue
-            snippet = _snippet(str(row["content"]))
-            results.append(
-                CodeSearchResult(
-                    path=str(row["file_path"]),
-                    line=int(row["start_line"]),
-                    snippet=snippet,
-                    chunk_type=str(row["chunk_type"]),
-                    symbol_name=row["symbol_name"],
-                    qualified_name=row["qualified_name"],
-                )
-            )
-            if len(results) >= limit:
-                break
-        return results
+        rows: list[dict[str, object]]
+        if self.store.has_fts5():
+            try:
+                rows = self.store.search_fts(fts_match_query(tokens), limit=200)
+            except sqlite3.DatabaseError:
+                rows = self._fallback_rows(tokens)
+        else:
+            rows = self._fallback_rows(tokens)
+        return rank_rows(rows, query, limit)
 
     def _iter_files(self, base: Path):
         for path in base.rglob("*"):
@@ -144,13 +129,25 @@ class CodeIndex:
                 digest.update(block)
         return digest.hexdigest()
 
-
-def _snippet(content: str) -> str:
-    for line in content.splitlines():
-        stripped = line.strip()
-        if stripped:
-            return stripped
-    return ""
+    def _fallback_rows(self, tokens: list[str]) -> list[dict[str, object]]:
+        rows = self.store.search_like(tokens, limit=500)
+        filtered: list[dict[str, object]] = []
+        for row in rows:
+            searchable_tokens = tokenize_code_text(
+                " ".join(
+                    [
+                        str(row["content"]),
+                        str(row["symbol_name"] or ""),
+                        str(row["qualified_name"] or ""),
+                        str(row["file_path"]),
+                        str(row["chunk_type"]),
+                    ]
+                )
+            )
+            searchable = set(searchable_tokens)
+            if all(token in searchable for token in tokens):
+                filtered.append(row)
+        return filtered
 
 
 def _is_relative_to(path: Path, base: Path) -> bool:

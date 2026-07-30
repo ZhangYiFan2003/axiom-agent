@@ -57,6 +57,219 @@ class MemoryStore:
             )
         return record
 
+    def save_fact_value(
+        self,
+        *,
+        scope_type: MemoryScopeType,
+        scope_id: str,
+        key: str,
+        category: str,
+        content: str,
+        confidence: float,
+        source_event_start_id: int | None = None,
+        source_event_end_id: int | None = None,
+        metadata: dict[str, object] | None = None,
+        record_id: str | None = None,
+    ) -> MemoryRecord:
+        now = _now()
+        base_metadata = dict(metadata or {})
+        base_metadata.update(
+            {
+                "active": True,
+                "category": category,
+                "confidence": confidence,
+                "key": key,
+                "value": content.strip(),
+            }
+        )
+        with self._connect() as conn:
+            conn.execute("begin immediate")
+            active_rows = conn.execute(
+                """
+                select id, kind, scope_type, scope_id, content, created_at, updated_at,
+                       source_event_start_id, source_event_end_id, metadata
+                from memory_records
+                where kind = 'fact'
+                  and scope_type = ?
+                  and scope_id = ?
+                """,
+                (scope_type.value, scope_id),
+            ).fetchall()
+            active_records = [
+                record
+                for record in (_record_from_row(row) for row in active_rows)
+                if record.metadata.get("active", True)
+                and record.metadata.get("key") == key
+            ]
+            duplicate = next(
+                (
+                    record
+                    for record in active_records
+                    if _equivalent_fact_value(record.content, content)
+                ),
+                None,
+            )
+            if duplicate is not None:
+                merged_metadata = dict(duplicate.metadata)
+                merged_metadata["confidence"] = max(
+                    _float_metadata(merged_metadata.get("confidence")),
+                    confidence,
+                )
+                merged_metadata["last_seen_event_id"] = source_event_end_id
+                merged_metadata["observation_count"] = int(
+                    merged_metadata.get("observation_count") or 1
+                ) + 1
+                merged_metadata["supporting_event_ranges"] = _supporting_ranges(
+                    merged_metadata,
+                    source_event_start_id,
+                    source_event_end_id,
+                )
+                conn.execute(
+                    """
+                    update memory_records
+                    set updated_at = ?,
+                        source_event_start_id = coalesce(source_event_start_id, ?),
+                        source_event_end_id = coalesce(?, source_event_end_id),
+                        metadata = ?
+                    where id = ?
+                    """,
+                    (
+                        now,
+                        source_event_start_id,
+                        source_event_end_id,
+                        json.dumps(merged_metadata, ensure_ascii=False),
+                        duplicate.id,
+                    ),
+                )
+                row = conn.execute(
+                    """
+                    select id, kind, scope_type, scope_id, content, created_at, updated_at,
+                           source_event_start_id, source_event_end_id, metadata
+                    from memory_records
+                    where id = ?
+                    """,
+                    (duplicate.id,),
+                ).fetchone()
+                return _record_from_row(row)
+
+            versions = [_int_metadata(record.metadata.get("version")) for record in active_records]
+            memory_id = record_id or f"mem_{uuid4().hex}"
+            base_metadata["version"] = max(versions, default=0) + 1
+            base_metadata["supersedes"] = [record.id for record in active_records]
+            base_metadata["supporting_event_ranges"] = _supporting_ranges(
+                base_metadata,
+                source_event_start_id,
+                source_event_end_id,
+            )
+            for old in active_records:
+                old_metadata = dict(old.metadata)
+                old_metadata["active"] = False
+                old_metadata["superseded_by"] = memory_id
+                old_metadata["superseded_at"] = now
+                conn.execute(
+                    """
+                    update memory_records
+                    set metadata = ?, updated_at = ?
+                    where id = ?
+                    """,
+                    (json.dumps(old_metadata, ensure_ascii=False), now, old.id),
+                )
+            record = MemoryRecord(
+                id=memory_id,
+                kind=MemoryKind.FACT,
+                scope_type=scope_type,
+                scope_id=scope_id,
+                content=content.strip(),
+                created_at=now,
+                updated_at=now,
+                source_event_start_id=source_event_start_id,
+                source_event_end_id=source_event_end_id,
+                metadata=base_metadata,
+            )
+            conn.execute(
+                """
+                insert into memory_records(
+                    id, kind, scope_type, scope_id, content, created_at, updated_at,
+                    source_event_start_id, source_event_end_id, metadata
+                )
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                _record_row(record),
+            )
+        return record
+
+    def retract_fact(
+        self,
+        *,
+        scope_type: MemoryScopeType,
+        scope_id: str,
+        key_or_id: str,
+        category: str | None = None,
+        source_event_start_id: int | None = None,
+        source_event_end_id: int | None = None,
+    ) -> int:
+        now = _now()
+        count = 0
+        with self._connect() as conn:
+            conn.execute("begin immediate")
+            rows = conn.execute(
+                """
+                select id, kind, scope_type, scope_id, content, created_at, updated_at,
+                       source_event_start_id, source_event_end_id, metadata
+                from memory_records
+                where kind = 'fact'
+                  and scope_type = ?
+                  and scope_id = ?
+                """,
+                (scope_type.value, scope_id),
+            ).fetchall()
+            for record in (_record_from_row(row) for row in rows):
+                if not record.metadata.get("active", True):
+                    continue
+                key = str(record.metadata.get("key") or "")
+                record_category = str(record.metadata.get("category") or "")
+                if record.id != key_or_id and key != key_or_id:
+                    continue
+                if category is not None and record_category != category:
+                    continue
+                metadata = dict(record.metadata)
+                metadata["active"] = False
+                metadata["retracted"] = True
+                metadata["retracted_at"] = now
+                metadata["retraction_event_start_id"] = source_event_start_id
+                metadata["retraction_event_end_id"] = source_event_end_id
+                conn.execute(
+                    """
+                    update memory_records
+                    set metadata = ?, updated_at = ?
+                    where id = ?
+                    """,
+                    (json.dumps(metadata, ensure_ascii=False), now, record.id),
+                )
+                count += 1
+        return count
+
+    def fact_history(
+        self,
+        *,
+        scope_type: MemoryScopeType,
+        scope_id: str,
+        key_or_id: str,
+        limit: int = 50,
+    ) -> list[MemoryRecord]:
+        records = self.list_records(
+            kind=MemoryKind.FACT,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            include_inactive=True,
+            limit=limit,
+        )
+        return [
+            record
+            for record in records
+            if record.id == key_or_id or record.metadata.get("key") == key_or_id
+        ]
+
     def save_active_summary(
         self,
         *,
@@ -302,6 +515,13 @@ class MemoryStore:
                     "create index if not exists idx_memory_records_source "
                     "on memory_records(source_event_start_id, source_event_end_id)"
                 ),
+                """
+                create unique index if not exists idx_memory_records_active_fact_key
+                on memory_records(scope_type, scope_id, json_extract(metadata, '$.key'))
+                where kind = 'fact'
+                  and coalesce(json_extract(metadata, '$.active'), 1) = 1
+                  and json_extract(metadata, '$.key') is not null
+                """,
             ]:
                 conn.execute(statement)
             self._migrate_old_rows(conn)
@@ -359,6 +579,24 @@ class MemoryStore:
             ).fetchone()
         return str(row[0]) if row else None
 
+    def get_meta(self, key: str) -> str | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "select value from memory_schema_meta where key = ?",
+                (key,),
+            ).fetchone()
+        return str(row[0]) if row else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                insert or replace into memory_schema_meta(key, value)
+                values (?, ?)
+                """,
+                (key, value),
+            )
+
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.db_path)
 
@@ -412,3 +650,40 @@ def _search_sort_key(record: MemoryRecord) -> tuple[float, str, str]:
     except (TypeError, ValueError):
         confidence_value = 0.0
     return (confidence_value, record.updated_at, record.id)
+
+
+def _equivalent_fact_value(left: str, right: str) -> bool:
+    return " ".join(left.casefold().split()) == " ".join(right.casefold().split())
+
+
+def _float_metadata(value: object) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _int_metadata(value: object) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _supporting_ranges(
+    metadata: dict[str, object],
+    start_id: int | None,
+    end_id: int | None,
+) -> list[list[int | None]]:
+    existing = metadata.get("supporting_event_ranges")
+    ranges = (
+        [item for item in existing if isinstance(item, list)]
+        if isinstance(existing, list)
+        else []
+    )
+    candidate = [start_id, end_id]
+    if candidate not in ranges:
+        ranges.append(candidate)
+    if len(ranges) > 20:
+        ranges = ranges[:1] + ranges[-19:]
+    return ranges

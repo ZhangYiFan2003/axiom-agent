@@ -40,7 +40,7 @@ stage. This document does not repeat the model request.
 | Built-in tools | `src/axiom/tools/builtins.py`, `src/axiom/tools/registry.py` | Partially verified | Tool registry and read/write tool tests passed. Not every built-in tool was exercised end to end. |
 | Code search, symbols, call graph, and graph-aware context | `src/axiom/rag/*`, `src/axiom/tools/builtins.py`, `src/axiom/entrypoints/repl.py` | Verified | AST chunking, lexical/vector/hybrid search, symbol resolution, conservative static call graph, and graph-aware context assembly have deterministic no-network fixture tests. |
 | ReAct loop | `src/axiom/agent/query.py`, `src/axiom/agent/agent.py` | Verified | `tests/test_query.py` uses a Fake LLM to exercise Agent -> LLM response -> tool call -> tool execution -> observation -> final answer without external API calls. |
-| Memory | `src/axiom/memory/*` | Verified | Memory tests verify legacy save/list/search/clear compatibility, additive schema migration, typed memory kinds and scopes, fact supersession, bounded tool-result digests, Map-Reduce summary checkpoints, single-active-summary invariants, incremental ranges, failure fallback, and budgeted deterministic memory context with temporary SQLite databases. |
+| Memory | `src/axiom/memory/*` | Verified | Memory tests verify legacy save/list/search/clear compatibility, additive schema migration, typed memory kinds and scopes, fact extraction, duplicate merge, conflict supersession, retraction, scoped preference reuse, bounded tool-result digests, Map-Reduce summary checkpoints, single-active-summary invariants, incremental ranges, failure fallback, and budgeted deterministic memory context with temporary SQLite databases. |
 | Skills | `src/axiom/skill/registry.py`, `src/axiom/tools/builtins.py` | Verified | Skill registry, skill context buffer, and `load_skill` context behavior tests passed. |
 | Snapshots | `src/axiom/snapshot/service.py` | Verified | `tests/test_snapshot.py` verifies snapshot creation, restore, listing, cleanup, and ignored cache directory behavior under an isolated temporary home. |
 | Plan-execute | `src/axiom/agent/plan_execute.py`, `src/axiom/plan/*` | Verified | `tests/test_plan.py` verifies plan parsing, dependency ordering, independent task parallelism, dependency result injection, worker failure propagation, final aggregation text, and usage/turn accounting with fake LLM clients. |
@@ -99,6 +99,7 @@ Test files:
 - `tests/test_lsp.py`
 - `tests/test_mcp.py`
 - `tests/test_memory.py`
+- `tests/test_memory_facts.py`
 - `tests/test_memory_summary.py`
 - `tests/test_multi_agent.py`
 - `tests/test_plan.py`
@@ -118,10 +119,10 @@ uv run pytest
 
 Result:
 
-- Passed: 133
+- Passed: 145
 - Failed: 0
 - Skipped: 0
-- Total executed: 133
+- Total executed: 145
 
 The pytest baseline is currently green after test home-directory isolation was
 added for Windows.
@@ -132,15 +133,15 @@ added for Windows.
   present. It should not be included in default local test runs.
 - Interactive REPL behavior is less extensively covered than non-interactive paths, though code context slash-command dispatch is now covered without launching a terminal.
 - Runtime API public deployment, load testing, distributed queues, real-provider CI, and unlimited live streaming are not covered by the current automated baseline.
-- Runtime thread events, typed memory records, and Map-Reduce summary checkpoints are persisted locally, but automatic fact extraction, semantic memory retrieval, remote summarization CI, and cross-thread/user preference evaluation are not implemented yet.
+- Runtime thread events, typed memory records, Map-Reduce summary checkpoints, and conservative scoped fact/preference extraction are persisted locally, but semantic memory retrieval, production LLM extraction evaluation, remote summarization/extraction CI, and cross-project preference sharing are not implemented yet.
 - MCP long-running stdio/http server behavior is only partially covered through
   request handler and client tests.
 - Broader end-to-end coverage for every built-in tool is still incomplete, though code search, symbol, call graph, and graph-aware context tools now have deterministic fixture coverage.
 
 ## 6. Recommended next-stage tasks
 
-1. Add Memory v2 automatic fact extraction, fact merge behavior, and cross-thread preference evaluation.
-2. Add structured Agent run observability for ReAct, tool execution, Plan-and-Execute, and multi-agent workflows.
-3. Add MCP stdio/http transport lifecycle tests with deterministic process cleanup.
+1. Add structured Agent run observability for ReAct, tool execution, Plan-and-Execute, and multi-agent workflows.
+2. Add MCP stdio/http transport lifecycle tests with deterministic process cleanup.
+3. Add optional LLM-backed memory extraction evaluation with strict schemas and no default network calls.
 4. Broaden no-network tests for high-risk built-in tools beyond the current read/write, code search, Runtime API, and ReAct `read_file` paths.
 5. Keep paid model verification as an explicit manual smoke command, never as a default automated test.

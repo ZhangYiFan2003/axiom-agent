@@ -11,6 +11,7 @@ from axiom.lsp import diagnose_file
 from axiom.memory import MemoryManager
 from axiom.policy import CommandGuard, PathGuard
 from axiom.rag.code_index_factory import create_code_index
+from axiom.rag.context import serialized_item_text
 from axiom.rag.embeddings import EmbeddingError
 from axiom.skill import SkillRegistry
 from axiom.snapshot import SnapshotService
@@ -220,6 +221,31 @@ def get_builtin_tools() -> list[Tool]:
             ),
             required_keys=["query"],
             handler=search_code,
+        ),
+        Tool(
+            name="get_code_context",
+            description=(
+                "Assemble graph-aware code context from search seeds, symbol definitions, "
+                "references, callers, callees, and bounded call paths."
+            ),
+            parameters=object_schema(
+                {
+                    "query": {
+                        "type": "string",
+                        "description": "Natural language query or unique symbol",
+                    },
+                    "mode": {"type": "string", "description": "auto, lexical, vector, or hybrid"},
+                    "max_graph_depth": {"type": "number", "description": "Maximum call path depth"},
+                    "max_context_chars": {
+                        "type": "number",
+                        "description": "Maximum context characters",
+                    },
+                    "max_items": {"type": "number", "description": "Maximum context items"},
+                },
+                ["query"],
+            ),
+            required_keys=["query"],
+            handler=get_code_context,
         ),
         Tool(
             name="find_symbol",
@@ -509,6 +535,35 @@ async def search_code(payload: dict[str, Any], context: ToolContext) -> ToolResu
         "\n".join(f"{item.path}:{item.line}: {item.snippet}" for item in results),
         display_summary=f"code search: {backend}",
     )
+
+
+async def get_code_context(payload: dict[str, Any], context: ToolContext) -> ToolResult:
+    index = create_code_index(context.cwd, context.config)
+    try:
+        result = await asyncio.to_thread(
+            index.build_code_context,
+            str(payload["query"]),
+            mode=str(payload.get("mode") or "auto"),
+            max_graph_depth=int(payload.get("max_graph_depth") or 2),
+            max_context_chars=int(payload.get("max_context_chars") or 24_000),
+            max_items=int(payload.get("max_items") or 30),
+        )
+    except EmbeddingError as exc:
+        return ToolResult(f"Embedding search unavailable: {exc}", is_error=True)
+    if not result.items:
+        return ToolResult("(no context items; run /index first)")
+    rows = [
+        (
+            f"query: {result.query}\n"
+            f"budget: {result.estimated_tokens}/{result.max_estimated_tokens} estimated tokens, "
+            f"{result.estimated_chars}/{result.max_context_chars} chars, "
+            f"truncated={str(result.truncated).lower()}, "
+            f"seeds={result.seed_count}, expanded_symbols={result.expanded_symbol_count}"
+        )
+    ]
+    for item in result.items:
+        rows.append("---\n" + serialized_item_text(item).rstrip())
+    return ToolResult("\n\n".join(rows), display_summary=f"context: {len(result.items)} items")
 
 
 async def find_symbol(payload: dict[str, Any], context: ToolContext) -> ToolResult:

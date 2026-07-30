@@ -5,6 +5,11 @@ index. It persists exact call edges, direct callers/callees, bounded call paths,
 and recursive components. It is not a runtime call graph, compiler, language
 server, control-flow graph, or data-flow graph.
 
+Stage 3D consumes this graph for graph-aware code context assembly. The context
+builder expands search or unique-symbol seeds through direct callers/callees and
+bounded incoming/outgoing paths, while preserving the same conservative edge
+eligibility rules.
+
 ## Exact Edge Eligibility
 
 Only references that satisfy every rule become call edges:
@@ -139,6 +144,7 @@ Built-in tools add:
 - `find_callees`
 - `trace_call_chain`
 - `find_recursive_components`
+- `get_code_context`
 
 Tool descriptions use "static high-confidence call graph" and do not claim
 complete runtime dispatch.

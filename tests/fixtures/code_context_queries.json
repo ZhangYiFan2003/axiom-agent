@@ -1,0 +1,38 @@
+[
+  {
+    "query": "start_order",
+    "relevant_symbol_names": ["start_order", "load_user", "build_response"],
+    "relevant_files": ["flow.py"],
+    "required_reasons": ["search_seed", "callee"]
+  },
+  {
+    "query": "who calls render_profile",
+    "relevant_symbol_names": ["render_profile", "build_response"],
+    "relevant_files": ["flow.py"],
+    "required_reasons": ["caller"]
+  },
+  {
+    "query": "multi hop from start_order through load_user",
+    "relevant_symbol_names": ["start_order", "load_user", "read_database", "normalize_user"],
+    "relevant_files": ["flow.py"],
+    "required_reasons": ["outgoing_path"]
+  },
+  {
+    "query": "retry_loop",
+    "relevant_symbol_names": ["retry_loop"],
+    "relevant_files": ["flow.py"],
+    "required_reasons": ["search_seed"]
+  },
+  {
+    "query": "duplicate",
+    "relevant_symbol_names": ["duplicate"],
+    "relevant_files": ["ambiguous_a.py", "ambiguous_b.py"],
+    "required_reasons": ["search_seed"]
+  },
+  {
+    "query": "no symbol should match this billing webhook",
+    "relevant_symbol_names": [],
+    "relevant_files": [],
+    "required_reasons": []
+  }
+]

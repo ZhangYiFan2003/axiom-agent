@@ -4,7 +4,7 @@
 
 A modular Python runtime and CLI for building tool-using AI agents.
 
-Axiom Agent Runtime provides a small but complete foundation for experimenting with terminal agents: a CLI, one-shot prompts, a ReAct loop, tool execution, memory, snapshots, skills, MCP integration, Plan-and-Execute, multi-agent orchestration, and a lightweight Runtime API. The current baseline is designed to be testable without real model calls, external MCP servers, secrets, or user-directory writes.
+Axiom Agent Runtime provides a small but complete foundation for experimenting with terminal agents: a CLI, one-shot prompts, a ReAct loop, tool execution, memory, snapshots, skills, MCP integration, Plan-and-Execute, multi-agent orchestration, graph-aware code context assembly, and a lightweight Runtime API. The current baseline is designed to be testable without real model calls, external MCP servers, secrets, or user-directory writes.
 
 ## Overview
 
@@ -14,6 +14,7 @@ Axiom is organized around a few core paths:
 - `QueryEngine` as the main facade for ReAct, plan execution, and multi-agent flows.
 - OpenAI-compatible LLM client abstraction for real provider calls when configured.
 - Tool registry and executor for model-requested local tool calls.
+- AST code index, hybrid retrieval, symbol graph, and graph-aware context builder for repository understanding.
 - Memory, snapshots, skills, MCP, and Runtime API modules for runtime state and integrations.
 
 The core Agent Runtime paths are covered by offline tests with fake LLM clients. Some integration surfaces, such as MCP server transport lifecycle and live Runtime API serving, are intentionally marked as partially verified until they have stable end-to-end transport tests.
@@ -27,6 +28,7 @@ The core Agent Runtime paths are covered by offline tests with fake LLM clients.
 | ReAct Agent | Executes the loop from model response to tool call, observation, and final answer. | Tested |
 | Tool Calling | Merges streamed tool-call deltas, executes registered tools, and replays tool results to the model. | Tested |
 | Built-in Tools | Includes file, shell, search, memory, skill, web, AST lexical/vector code search, static symbol/reference lookup, high-confidence static call graph queries, and snapshot tools. | Partially tested |
+| Graph-Aware Code Context | Assembles search seeds, symbol definitions, references, callers, callees, and bounded call paths into budgeted agent context with reasons. | Tested |
 | Memory | Stores, reads, searches, clears, and isolates scoped long-term memory in SQLite. | Tested |
 | Snapshots | Creates, restores, lists, and cleans workspace snapshots under an isolated home in tests. | Tested |
 | Skills | Loads built-in, user, and project `SKILL.md` files and supports skill context injection. | Tested |
@@ -51,6 +53,7 @@ flowchart TD
     E --> G["Snapshots"]
     E --> H["Skills"]
     E --> I["MCP"]
+    E --> J["Code Context"]
 ```
 
 Key modules:
@@ -61,6 +64,7 @@ Key modules:
 - `src/axiom/llm/`: LLM protocol, provider factory, and OpenAI-compatible client.
 - `src/axiom/agent/`: ReAct query loop, Plan-and-Execute, and multi-agent orchestration.
 - `src/axiom/tools/`: tool model, registry, executor, and built-in tools.
+- `src/axiom/rag/`: AST chunks, lexical/vector/hybrid search, symbol index, call graph, and graph-aware code context.
 - `src/axiom/mcp/`: MCP client, MCP config, and MCP server handler support.
 - `src/axiom/memory/`: scoped long-term memory persistence.
 - `src/axiom/snapshot/`: workspace snapshot service.
@@ -159,10 +163,10 @@ uv run pytest
 Current baseline:
 
 ```text
-45 tests passing
+104 tests passing
 ```
 
-The default tests use fake LLM clients, temporary directories, temporary SQLite databases, and localhost-safe handler paths. They do not require API keys and do not call external model providers.
+The default tests use fake LLM clients, temporary directories, temporary SQLite databases, deterministic code-search fixtures, and localhost-safe handler paths. They do not require API keys and do not call external model providers.
 
 GitHub Actions runs the same test suite on push and pull request events for `main`.
 
@@ -178,6 +182,7 @@ Verified in the current baseline:
 - Plan-and-Execute
 - Multi-agent orchestration
 - MCP client stdio discovery/call path
+- AST code indexing, lexical/vector/hybrid search, symbol resolution, conservative static call graph, and graph-aware code context assembly
 - Runtime task store and direct API handler paths
 
 Partially verified or intentionally bounded:
@@ -243,7 +248,7 @@ Near-term directions:
 - Provider adapter improvements
 - Richer MCP transport lifecycle verification
 - Runtime API integration testing
-- Retrieval and RAG tool support
+- Retrieval evaluation and graph-aware context quality improvements
 - Observability for agent runs, tools, and runtime events
 
 No dates are promised; the roadmap is intentionally small so the current verified baseline remains stable.

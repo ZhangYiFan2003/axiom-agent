@@ -1,9 +1,10 @@
 # Vector and Hybrid Code Search
 
 Stage 3B-2 adds optional vector storage and hybrid ranking on top of the AST and
-FTS5 lexical index. Later symbol and call-graph stages are separate from vector
-ranking. This document does not make ANN indexing or production semantic
-accuracy claims.
+FTS5 lexical index. Later symbol and call-graph stages remain separate from
+vector ranking, but Stage 3D can consume lexical, vector, or hybrid search
+results as seeds for graph-aware context assembly. This document does not make
+ANN indexing or production semantic accuracy claims.
 
 ## Provider Model
 
@@ -111,6 +112,11 @@ Hybrid search uses lexical candidates union vector candidates, then Reciprocal
 Rank Fusion, dedupe, and limit. Raw BM25 and cosine values are not added
 directly. RRF combines ranks with configured lexical and vector weights.
 
+Graph-aware code context uses search results only as seed chunks. It does not
+add raw BM25, cosine, and graph distance scores together. Context ordering is
+handled by `src/axiom/rag/context.py` with reason priority, seed rank, graph
+distance, and stable path/line tie-breakers.
+
 ## Benchmark
 
 `benchmarks/benchmark_code_search.py` measures local lexical, vector-only, and
@@ -149,6 +155,10 @@ Across the combined 25-query fixture set, hybrid has the best aggregate score:
 The aggregate does not mean hybrid wins every query type. It shows that RRF is
 more stable when the caller does not know whether a query is lexical or
 paraphrase-oriented.
+
+Stage 3D adds a separate deterministic context fixture for comparing
+search-only seed recall against graph-aware context expansion. See
+[`docs/graph-aware-code-context.md`](graph-aware-code-context.md).
 
 ## Limitations
 

@@ -128,6 +128,9 @@ class CodeSearchResult:
     path: str
     line: int
     snippet: str
+    chunk_id: str | None = None
+    end_line: int | None = None
+    content: str | None = None
     chunk_type: str | None = None
     symbol_name: str | None = None
     qualified_name: str | None = None
@@ -140,6 +143,33 @@ class CodeSearchResult:
     lexical_rank: int | None = None
     vector_rank: int | None = None
     embedding_profile: str | None = None
+
+
+@dataclass(slots=True)
+class CodeContextItem:
+    chunk_id: str
+    symbol_id: str | None
+    file_path: str
+    start_line: int
+    end_line: int
+    content: str
+    reason: str
+    seed_rank: int | None
+    graph_distance: int
+    estimated_tokens: int
+
+
+@dataclass(slots=True)
+class CodeContextResult:
+    query: str
+    items: list[CodeContextItem]
+    estimated_chars: int
+    estimated_tokens: int
+    truncated: bool
+    seed_count: int
+    expanded_symbol_count: int
+    max_context_chars: int
+    max_estimated_tokens: int
 
 
 @dataclass(slots=True)

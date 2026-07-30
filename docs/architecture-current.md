@@ -136,6 +136,26 @@ flowchart TD
   - Registers built-in workspace, shell, web, memory, skill, code search, and
     snapshot restore tools.
 
+### Code intelligence
+
+- `src/axiom/rag/code_index.py`
+  - Public facade for AST indexing, lexical/vector/hybrid search, symbol
+    lookup, call-graph queries, and graph-aware context assembly.
+- `src/axiom/rag/context.py`
+  - Builds deterministic code context from search seeds, unique symbol
+    mentions, definitions, direct references, direct callers/callees, and
+    bounded incoming/outgoing call paths.
+  - Enforces local character, token-estimate, seed, depth, and item hard limits.
+  - Preserves workspace-relative paths, reason labels, graph distance, budget
+    usage, and stable ordering for agent consumption.
+- `src/axiom/rag/store.py`
+  - Persists indexed files, AST chunks, FTS5 rows, embedding profiles, vector
+    embeddings, symbol definitions/imports/references, and exact call edges in
+    SQLite schema version 6.
+- `src/axiom/rag/call_graph.py`
+  - Builds the conservative static call graph and implements callers, callees,
+    bounded call paths, and recursive component analysis.
+
 ### MCP
 
 - `src/axiom/mcp/config.py`

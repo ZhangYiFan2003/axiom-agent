@@ -38,6 +38,7 @@ stage. This document does not repeat the model request.
 | Streaming | `src/axiom/llm/openai_compatible.py`, `src/axiom/render/rich_renderer.py` | Partially verified | One-shot prompt uses the streaming client path; renderer streaming behavior has unit coverage. Raw chunk-level live provider behavior was not separately inspected. |
 | Tool calling | `src/axiom/agent/query.py`, `src/axiom/tools/executor.py` | Verified | Fake LLM tests verify tool-call delta merge, built-in `read_file` execution, tool result emission, observation replay into the second LLM turn, and final response completion. |
 | Built-in tools | `src/axiom/tools/builtins.py`, `src/axiom/tools/registry.py` | Partially verified | Tool registry and read/write tool tests passed. Not every built-in tool was exercised end to end. |
+| Code search, symbols, call graph, and graph-aware context | `src/axiom/rag/*`, `src/axiom/tools/builtins.py`, `src/axiom/entrypoints/repl.py` | Verified | AST chunking, lexical/vector/hybrid search, symbol resolution, conservative static call graph, and graph-aware context assembly have deterministic no-network fixture tests. |
 | ReAct loop | `src/axiom/agent/query.py`, `src/axiom/agent/agent.py` | Verified | `tests/test_query.py` uses a Fake LLM to exercise Agent -> LLM response -> tool call -> tool execution -> observation -> final answer without external API calls. |
 | Memory | `src/axiom/memory/manager.py` | Verified | `tests/test_memory.py` verifies write, read, persistence across manager instances, search, clear, and project scope isolation with a temporary SQLite database. |
 | Skills | `src/axiom/skill/registry.py`, `src/axiom/tools/builtins.py` | Verified | Skill registry, skill context buffer, and `load_skill` context behavior tests passed. |
@@ -68,6 +69,7 @@ secrets and external services unless explicitly noted.
 | Doctor | `uv run axiom doctor --cwd .` | None expected | No |
 | One-shot prompt | `uv run axiom --plain -p "Reply with OK"` | May call paid API | Creates snapshots and uses configured provider |
 | Built-in tools | Run existing `tests/test_tools.py` | None expected | Temp files only |
+| Code search/context | Run existing `tests/test_code_index_ast.py`, `tests/test_code_search_lexical.py`, `tests/test_code_search_vector.py`, `tests/test_code_symbol_index.py`, `tests/test_code_call_graph.py`, and `tests/test_code_context.py` | None expected | Temp files and temp SQLite code indexes only |
 | Tool calling/ReAct | Run existing `tests/test_query.py` | None expected | Temp files plus snapshot state |
 | Skills | Run existing `tests/test_skill.py` | None expected | Temp files and temp home state |
 | Snapshots | Run existing `tests/test_snapshot.py` | None expected | Temp project and snapshot state |
@@ -86,6 +88,12 @@ Pytest configuration:
 
 Test files:
 
+- `tests/test_code_call_graph.py`
+- `tests/test_code_context.py`
+- `tests/test_code_index_ast.py`
+- `tests/test_code_search_lexical.py`
+- `tests/test_code_search_vector.py`
+- `tests/test_code_symbol_index.py`
 - `tests/test_config.py`
 - `tests/test_image.py`
 - `tests/test_lsp.py`
@@ -109,10 +117,10 @@ uv run pytest
 
 Result:
 
-- Passed: 45
+- Passed: 104
 - Failed: 0
 - Skipped: 0
-- Total executed: 45
+- Total executed: 104
 
 The pytest baseline is currently green after test home-directory isolation was
 added for Windows.
@@ -121,16 +129,16 @@ added for Windows.
 
 - The one-shot prompt path can call a paid provider when API configuration is
   present. It should not be included in default local test runs.
-- REPL behavior is not covered by the current automated baseline.
+- Interactive REPL behavior is less extensively covered than non-interactive paths, though code context slash-command dispatch is now covered without launching a terminal.
 - Runtime API live HTTP serving and LLM-backed thread turns are not covered by the current automated baseline.
 - MCP long-running stdio/http server behavior is only partially covered through
   request handler and client tests.
-- Broader end-to-end coverage for every built-in tool is still incomplete.
+- Broader end-to-end coverage for every built-in tool is still incomplete, though code search, symbol, call graph, and graph-aware context tools now have deterministic fixture coverage.
 
 ## 6. Recommended next-stage tasks
 
-1. Add broader no-network tests for high-risk built-in tools beyond the current read/write and ReAct `read_file` path.
-2. Add a Runtime API live HTTP smoke test on localhost with an ephemeral port, if server lifecycle hooks are made test-friendly.
+1. Add a Runtime API live HTTP smoke test on localhost with an ephemeral port, if server lifecycle hooks are made test-friendly.
+2. Add structured Agent run observability for ReAct, tool execution, Plan-and-Execute, and multi-agent workflows.
 3. Add MCP stdio/http transport lifecycle tests with deterministic process cleanup.
-4. Add a REPL smoke test for slash command dispatch without launching a fully interactive terminal.
+4. Broaden no-network tests for high-risk built-in tools beyond the current read/write, code search, and ReAct `read_file` paths.
 5. Keep paid model verification as an explicit manual smoke command, never as a default automated test.

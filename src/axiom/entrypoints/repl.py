@@ -182,17 +182,34 @@ async def _handle_slash(
         agent.clear_history()
         console.clear()
     elif command == "/context":
-        memories = MemoryManager(config.memory.long_term_db_path, scope=cwd).list(limit=5)
-        table = Table(title="Axiom Agent Runtime Context")
-        table.add_column("Field")
-        table.add_column("Value")
-        table.add_row("cwd", cwd)
-        table.add_row("model", f"{config.llm.model} ({config.llm.provider})")
-        table.add_row("context window", str(agent.llm_client.max_context_window))
-        table.add_row("render", config.render_mode)
-        table.add_row("memory", f"{len(memories)} recent entries")
-        table.add_row("tools", str(len(registry.list_names())))
-        console.print(table)
+        if arg:
+            index = create_code_index(cwd, config)
+            try:
+                result = await asyncio.to_thread(
+                    index.build_code_context,
+                    arg,
+                    mode=config.embedding.search_mode,
+                    max_graph_depth=2,
+                    max_context_chars=12_000,
+                    max_items=12,
+                )
+            except EmbeddingError as exc:
+                console.print(f"[red]Embedding search unavailable:[/red] {exc}")
+                result = None
+            if result is not None:
+                console.print(_format_code_context(result) or "(no context items)")
+        else:
+            memories = MemoryManager(config.memory.long_term_db_path, scope=cwd).list(limit=5)
+            table = Table(title="Axiom Agent Runtime Context")
+            table.add_column("Field")
+            table.add_column("Value")
+            table.add_row("cwd", cwd)
+            table.add_row("model", f"{config.llm.model} ({config.llm.provider})")
+            table.add_row("context window", str(agent.llm_client.max_context_window))
+            table.add_row("render", config.render_mode)
+            table.add_row("memory", f"{len(memories)} recent entries")
+            table.add_row("tools", str(len(registry.list_names())))
+            console.print(table)
     elif command == "/memory":
         await _memory_command(arg, console, cwd, config)
     elif command == "/save":
@@ -503,6 +520,27 @@ def _format_recursive(index, components) -> str:
             for symbol_id in component.symbol_ids
         ]
         rows.append(f"{component.recursion_kind}: " + " <-> ".join(names))
+    return "\n".join(rows)
+
+
+def _format_code_context(result) -> str:
+    rows = [
+        (
+            f"items={len(result.items)} "
+            f"tokens={result.estimated_tokens}/{result.max_estimated_tokens} "
+            f"truncated={str(result.truncated).lower()}"
+        )
+    ]
+    for item in result.items:
+        first_line = next((line.strip() for line in item.content.splitlines() if line.strip()), "")
+        if len(first_line) > 120:
+            first_line = first_line[:117] + "..."
+        symbol = item.symbol_id[:12] if item.symbol_id else "-"
+        rows.append(
+            f"{item.reason} d={item.graph_distance} "
+            f"{item.file_path}:{item.start_line}-{item.end_line} "
+            f"symbol={symbol} {first_line}"
+        )
     return "\n".join(rows)
 
 

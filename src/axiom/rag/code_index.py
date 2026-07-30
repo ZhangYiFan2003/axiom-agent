@@ -31,6 +31,7 @@ from axiom.rag.languages import SKIP_DIRS, detect_language, is_indexable
 from axiom.rag.models import (
     CallEdge,
     CallPathResult,
+    CodeContextResult,
     CodeSearchResult,
     IndexedFile,
     IndexStats,
@@ -198,6 +199,29 @@ class CodeIndex:
         if selected_mode == "hybrid":
             return self._search_hybrid(query, limit)
         return self._search_auto(query, limit)
+
+    def build_code_context(
+        self,
+        query: str,
+        *,
+        mode: str = "auto",
+        max_context_chars: int = 24_000,
+        max_estimated_tokens: int = 6_000,
+        max_seed_chunks: int = 8,
+        max_graph_depth: int = 2,
+        max_items: int = 30,
+    ) -> CodeContextResult:
+        from axiom.rag.context import CodeContextBuilder
+
+        return CodeContextBuilder(self).build(
+            query,
+            mode=mode,
+            max_context_chars=max_context_chars,
+            max_estimated_tokens=max_estimated_tokens,
+            max_seed_chunks=max_seed_chunks,
+            max_graph_depth=max_graph_depth,
+            max_items=max_items,
+        )
 
     def find_definitions(
         self,

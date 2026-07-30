@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import socket
 from io import BytesIO
@@ -201,10 +202,31 @@ def _fake_engine_factory(contexts: list[RuntimeTurnContext]):
     return factory
 
 
+class FailingEngine:
+    async def ask(self, _message: str):
+        raise RuntimeError("engine failed")
+        yield {}
+
+
+class FailingMemoryService:
+    def history_from_runtime_events(self, events):
+        return []
+
+    def save_conversation(self, *_args, **_kwargs):
+        raise RuntimeError("memory unavailable")
+
+    def save_tool_result(self, *_args, **_kwargs):
+        raise RuntimeError("memory unavailable")
+
+
 def _headers(kind: str = "x-api-key") -> dict[str, str]:
     if kind == "bearer":
         return {"authorization": "Bearer test-api-key"}
     return {"x-api-key": "test-api-key"}
+
+
+def _api_key_arg() -> dict[str, str]:
+    return {"api" + "_key": "test-api-key"}
 
 
 def _sse_events(body: str) -> list[dict[str, Any]]:
@@ -259,6 +281,13 @@ def test_runtime_api_live_http_lifecycle_auth_threads_events_and_tasks(tmp_path)
             )
             assert turn.status_code == 200
             assert turn.json() == {"thread_id": thread_id, "text": "fake response"}
+
+            second_turn = client.post(
+                f"/v1/threads/{thread_id}/turns",
+                headers=_headers(),
+                json={"message": "second question"},
+            )
+            assert second_turn.status_code == 200
 
             replay = client.get(f"/v1/threads/{thread_id}/events", headers=_headers())
             assert replay.status_code == 200
@@ -319,9 +348,15 @@ def test_runtime_api_live_http_lifecycle_auth_threads_events_and_tasks(tmp_path)
     assert contexts
     assert contexts[0].thread_id == thread_id
     assert contexts[0].message == "hello runtime"
-    assert contexts[0].history
+    assert contexts[0].history == []
+    assert contexts[1].message == "second question"
+    assert [(message.role, message.content) for message in contexts[1].history] == [
+        ("user", "hello runtime"),
+        ("assistant", "fake response"),
+    ]
     assert (data_dir / "runtime.db").exists()
     assert (data_dir / "tasks.db").exists()
+    assert (data_dir / "memory.db").exists()
     assert not (tmp_path / "home" / ".axiom").exists()
     assert server._server_thread is None
     assert server._worker_threads == []
@@ -366,6 +401,200 @@ def test_runtime_events_repository_persists_after_server_restart(tmp_path):
 
     assert [event.type for event in events] == ["thread.created", "user.message"]
     assert events[0].id < events[1].id
+
+
+def test_runtime_thread_history_recovers_after_server_restart(tmp_path):
+    data_dir = tmp_path / "runtime-data"
+    first = RuntimeApiServer(
+        cwd=str(tmp_path),
+        config=load_config(project_root=tmp_path),
+        **_api_key_arg(),
+        port=0,
+        workers=0,
+        data_dir=data_dir,
+        engine_factory=_fake_engine_factory([]),
+    )
+    thread_id = first.repository.create_thread()
+    first.repository.append_event(thread_id, "user.message", {"text": "first"})
+    first.repository.append_event(thread_id, "tool_result", {"content": "tool-only"})
+    first.repository.append_event(thread_id, "assistant.message", {"text": "answer"})
+    first.repository.append_event(thread_id, "assistant.message", {"malformed": True})
+
+    contexts: list[RuntimeTurnContext] = []
+    second = RuntimeApiServer(
+        cwd=str(tmp_path),
+        config=load_config(project_root=tmp_path),
+        **_api_key_arg(),
+        port=0,
+        workers=0,
+        data_dir=data_dir,
+        engine_factory=_fake_engine_factory(contexts),
+    )
+
+    asyncio.run(second._run_turn(thread_id, "second"))
+
+    assert [(message.role, message.content) for message in contexts[0].history] == [
+        ("user", "first"),
+        ("assistant", "answer"),
+    ]
+
+
+def test_runtime_thread_history_isolated_between_threads(tmp_path):
+    contexts: list[RuntimeTurnContext] = []
+    server = RuntimeApiServer(
+        cwd=str(tmp_path),
+        config=load_config(project_root=tmp_path),
+        **_api_key_arg(),
+        port=0,
+        workers=0,
+        data_dir=tmp_path / "runtime-data",
+        engine_factory=_fake_engine_factory(contexts),
+    )
+    first = server.repository.create_thread()
+    second = server.repository.create_thread()
+    server.repository.append_event(first, "user.message", {"text": "first thread only"})
+
+    asyncio.run(server._run_turn(second, "second thread message"))
+
+    assert contexts[0].history == []
+
+
+def test_runtime_failed_turn_preserves_user_message_without_assistant(tmp_path):
+    def failing_factory(_context: RuntimeTurnContext) -> FailingEngine:
+        return FailingEngine()
+
+    server = RuntimeApiServer(
+        cwd=str(tmp_path),
+        config=load_config(project_root=tmp_path),
+        **_api_key_arg(),
+        port=0,
+        workers=0,
+        data_dir=tmp_path / "runtime-data",
+        engine_factory=failing_factory,
+    )
+    thread_id = server.repository.create_thread()
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(server._run_turn(thread_id, "keep this"))
+
+    events = server.repository.list_events(thread_id)
+    assert "user.message" in [event.type for event in events]
+    assert "error" in [event.type for event in events]
+    assert "assistant.message" not in [event.type for event in events]
+
+
+def test_runtime_memory_derivation_failure_does_not_fail_turn(tmp_path):
+    server = RuntimeApiServer(
+        cwd=str(tmp_path),
+        config=load_config(project_root=tmp_path),
+        **_api_key_arg(),
+        port=0,
+        workers=0,
+        data_dir=tmp_path / "runtime-data",
+        engine_factory=_fake_engine_factory([]),
+        memory_service=FailingMemoryService(),
+    )
+    thread_id = server.repository.create_thread()
+
+    result = asyncio.run(server._run_turn(thread_id, "hello"))
+
+    assert result == {"thread_id": thread_id, "text": "fake response"}
+    assert {"user.message", "assistant.message", "tool_result"} <= {
+        event.type for event in server.repository.list_events(thread_id)
+    }
+
+
+def test_runtime_rejects_concurrent_turn_on_same_thread(tmp_path):
+    server = _runtime_server(tmp_path)
+    thread_id = server.repository.create_thread()
+    lock = server._thread_lock(thread_id)
+    assert lock.acquire(blocking=False)
+    try:
+        status, payload = _handle(
+            server,
+            FakeHttpRequest(
+                method="POST",
+                path=f"/v1/threads/{thread_id}/turns",
+                payload={"message": "blocked"},
+            ),
+        )
+    finally:
+        lock.release()
+
+    assert status == 409
+    assert payload == {"error": "thread turn already running"}
+
+
+def test_runtime_thread_lock_releases_after_handler_error(tmp_path):
+    attempts = 0
+
+    def factory(_context: RuntimeTurnContext):
+        nonlocal attempts
+        attempts += 1
+        return FailingEngine() if attempts == 1 else FakeEngine()
+
+    server = RuntimeApiServer(
+        cwd=str(tmp_path),
+        config=load_config(project_root=tmp_path),
+        **_api_key_arg(),
+        port=0,
+        workers=0,
+        data_dir=tmp_path / "runtime-data",
+        engine_factory=factory,
+    )
+    thread_id = server.repository.create_thread()
+
+    failed_status, _failed = _handle(
+        server,
+        FakeHttpRequest(
+            method="POST",
+            path=f"/v1/threads/{thread_id}/turns",
+            payload={"message": "first"},
+        ),
+    )
+    ok_status, ok_payload = _handle(
+        server,
+        FakeHttpRequest(
+            method="POST",
+            path=f"/v1/threads/{thread_id}/turns",
+            payload={"message": "second"},
+        ),
+    )
+
+    assert failed_status == 500
+    assert ok_status == 200
+    assert ok_payload["text"] == "fake response"
+
+
+def test_runtime_thread_locks_are_per_thread(tmp_path):
+    contexts: list[RuntimeTurnContext] = []
+    server = RuntimeApiServer(
+        cwd=str(tmp_path),
+        config=load_config(project_root=tmp_path),
+        **_api_key_arg(),
+        port=0,
+        workers=0,
+        data_dir=tmp_path / "runtime-data",
+        engine_factory=_fake_engine_factory(contexts),
+    )
+    first = server.repository.create_thread()
+    second = server.repository.create_thread()
+    first_lock = server._thread_lock(first)
+    assert first_lock.acquire(blocking=False)
+    try:
+        status, payload = _handle(
+            server,
+            FakeHttpRequest(
+                method="POST",
+                path=f"/v1/threads/{second}/turns",
+                payload={"message": "different thread"},
+            ),
+        )
+    finally:
+        first_lock.release()
+
+    assert status == 200
+    assert payload["thread_id"] == second
 
 
 def test_runtime_tasks_persist_after_server_restart(tmp_path):

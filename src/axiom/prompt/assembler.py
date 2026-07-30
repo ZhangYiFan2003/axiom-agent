@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 from axiom.config import AxiomConfig
-from axiom.memory import MemoryManager
+from axiom.memory import MemoryKind, MemoryScopeType, MemoryService
 from axiom.skill import SkillRegistry
 
 
@@ -63,8 +63,13 @@ class PromptAssembler:
                 except OSError:
                     continue
         if self.config.features.memory and self.config.memory.long_term_enabled:
-            manager = MemoryManager(self.config.memory.long_term_db_path, scope=self.cwd)
-            memories = manager.list(limit=8)
+            service = MemoryService(self.config.memory.long_term_db_path, project_scope=self.cwd)
+            memories = service.list_records(
+                kind=MemoryKind.FACT,
+                scope_type=MemoryScopeType.PROJECT,
+                scope_id=self.cwd,
+                limit=8,
+            )
             if memories:
                 chunks.append("\n".join(f"- {item.content}" for item in memories))
         return "\n\n".join(chunks)[:8000]

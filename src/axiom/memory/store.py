@@ -57,6 +57,95 @@ class MemoryStore:
             )
         return record
 
+    def save_active_summary(
+        self,
+        *,
+        scope_id: str,
+        content: str,
+        source_event_start_id: int | None,
+        source_event_end_id: int | None,
+        metadata: dict[str, object],
+        replaces: str | None = None,
+        record_id: str | None = None,
+    ) -> MemoryRecord:
+        now = _now()
+        memory_id = record_id or f"mem_{uuid4().hex}"
+        metadata = dict(metadata)
+        metadata["active"] = True
+        metadata["summary_stage"] = "reduce"
+        metadata["replaces"] = replaces
+        record = MemoryRecord(
+            id=memory_id,
+            kind=MemoryKind.SUMMARY,
+            scope_type=MemoryScopeType.THREAD,
+            scope_id=scope_id,
+            content=content.strip(),
+            created_at=now,
+            updated_at=now,
+            source_event_start_id=source_event_start_id,
+            source_event_end_id=source_event_end_id,
+            metadata=metadata,
+        )
+        with self._connect() as conn:
+            conn.execute(
+                """
+                insert into memory_records(
+                    id, kind, scope_type, scope_id, content, created_at, updated_at,
+                    source_event_start_id, source_event_end_id, metadata
+                )
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                _record_row(record),
+            )
+            rows = conn.execute(
+                """
+                select id, metadata
+                from memory_records
+                where kind = 'summary'
+                  and scope_type = ?
+                  and scope_id = ?
+                  and id != ?
+                """,
+                (record.scope_type.value, record.scope_id, record.id),
+            ).fetchall()
+            for row in rows:
+                old_metadata = _metadata(str(row[1]))
+                if old_metadata.get("summary_stage") != "reduce":
+                    continue
+                if not old_metadata.get("active", True):
+                    continue
+                old_metadata["active"] = False
+                old_metadata["superseded_by"] = record.id
+                conn.execute(
+                    "update memory_records set metadata = ?, updated_at = ? where id = ?",
+                    (json.dumps(old_metadata, ensure_ascii=False), _now(), str(row[0])),
+                )
+        return record
+
+    def active_summary(self, *, thread_id: str) -> MemoryRecord | None:
+        records = self.list_records(
+            kind=MemoryKind.SUMMARY,
+            scope_type=MemoryScopeType.THREAD,
+            scope_id=thread_id,
+            include_inactive=False,
+            limit=100,
+        )
+        reduce_summaries = [
+            record
+            for record in records
+            if record.metadata.get("summary_stage", "reduce") == "reduce"
+        ]
+        reduce_summaries.sort(
+            key=lambda record: (
+                int(record.metadata.get("version") or 0),
+                record.source_event_end_id or 0,
+                record.updated_at,
+                record.id,
+            ),
+            reverse=True,
+        )
+        return reduce_summaries[0] if reduce_summaries else None
+
     def list_records(
         self,
         *,

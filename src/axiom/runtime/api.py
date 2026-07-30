@@ -19,7 +19,7 @@ from axiom.agent import QueryEngine
 from axiom.bootstrap import build_tool_registry
 from axiom.config import AxiomConfig
 from axiom.llm import create_llm_client
-from axiom.memory import MemoryService
+from axiom.memory import MemoryService, SummaryPolicy
 from axiom.runtime.tasks import DurableTaskManager
 from axiom.types import Message
 
@@ -181,6 +181,7 @@ class RuntimeApiServer:
         self.memory_service = memory_service or MemoryService(
             self.data_dir / "memory.db",
             project_scope=self.cwd,
+            summary_policy=_summary_policy_from_config(config),
         )
         self.engine_factory = engine_factory
         self.tool_registry_factory = tool_registry_factory or build_tool_registry
@@ -407,6 +408,7 @@ class RuntimeApiServer:
             event_id=assistant_event_id,
         )
         self.repository.append_event(thread_id, "turn.completed", done_payload)
+        await self._summarize_thread_best_effort(thread_id)
         return {"thread_id": thread_id, "text": text}
 
     def _worker_loop(self) -> None:
@@ -511,6 +513,17 @@ class RuntimeApiServer:
                 content=content,
                 source_event_id=source_event_id,
             )
+        except Exception:
+            return
+
+    async def _summarize_thread_best_effort(self, thread_id: str) -> None:
+        summarize = getattr(self.memory_service, "summarize_thread", None)
+        if summarize is None:
+            return
+        try:
+            result = summarize(thread_id)
+            if inspect.isawaitable(result):
+                await result
         except Exception:
             return
 
@@ -639,3 +652,16 @@ def runtime_api_key(explicit: str | None = None) -> str:
     if not key:
         raise ValueError("AXIOM_RUNTIME_API_KEY is required for Runtime API")
     return key
+
+
+def _summary_policy_from_config(config: AxiomConfig) -> SummaryPolicy:
+    return SummaryPolicy(
+        enabled=config.features.context_compression,
+        threshold_messages=config.memory.summary_threshold_messages,
+        map_chunk_estimated_tokens=config.memory.summary_map_chunk_estimated_tokens,
+        reduce_input_estimated_tokens=config.memory.summary_reduce_input_estimated_tokens,
+        minimum_unsummarized_messages=config.memory.summary_minimum_unsummarized_messages,
+        recent_message_reserve=config.memory.summary_recent_message_reserve,
+        max_summary_chars=config.memory.summary_max_chars,
+        max_attempts=config.memory.summary_max_attempts,
+    )

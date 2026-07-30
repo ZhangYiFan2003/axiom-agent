@@ -50,6 +50,19 @@ class MemoryContextBuilder:
             recent_limit=recent_limit,
         )
         sections: list[MemoryContextSection] = []
+        summary_record = self.store.active_summary(thread_id=thread_id) if thread_id else None
+        all_conversation_records = (
+            self.store.list_records(
+                kind=MemoryKind.CONVERSATION,
+                scope_type=MemoryScopeType.THREAD,
+                scope_id=thread_id,
+                limit=1000,
+            )
+            if thread_id
+            else []
+        )
+        raw_skipped = _count_summarized_records(all_conversation_records, summary_record)
+        before_tokens = sum(estimate_tokens(record.content) for record in all_conversation_records)
         chars = 0
         tokens = 0
         records = 0
@@ -89,6 +102,22 @@ class MemoryContextBuilder:
             truncated=truncated,
             evicted_count=evicted,
             included_count=records,
+            summary_used=summary_record is not None,
+            summary_source_start_id=(
+                summary_record.source_event_start_id if summary_record is not None else None
+            ),
+            summary_source_end_id=(
+                summary_record.source_event_end_id if summary_record is not None else None
+            ),
+            raw_messages_included=sum(
+                len(section.records)
+                for section in sections
+                if section.name == "recent conversation"
+            ),
+            raw_messages_skipped_by_summary=raw_skipped,
+            estimated_tokens_before_compression=before_tokens,
+            estimated_tokens_after_compression=tokens,
+            compression_ratio=_compression_ratio(before_tokens, tokens),
         )
 
     def _candidate_records(
@@ -102,23 +131,23 @@ class MemoryContextBuilder:
     ) -> list[tuple[str, list[MemoryRecord]]]:
         sections: list[tuple[str, list[MemoryRecord]]] = []
         if thread_id:
-            summaries = self.store.list_records(
-                kind=MemoryKind.SUMMARY,
-                scope_type=MemoryScopeType.THREAD,
-                scope_id=thread_id,
-                limit=1,
-            )
+            summary = self.store.active_summary(thread_id=thread_id)
+            summaries = [summary] if summary is not None else []
             sections.append(("latest summary", summaries))
+            summary_end = summary.source_event_end_id if summary is not None else None
             recent = list(
                 reversed(
-                    self.store.list_records(
-                        kind=MemoryKind.CONVERSATION,
-                        scope_type=MemoryScopeType.THREAD,
-                        scope_id=thread_id,
-                        limit=recent_limit,
+                    _exclude_summarized(
+                        self.store.list_records(
+                            kind=MemoryKind.CONVERSATION,
+                            scope_type=MemoryScopeType.THREAD,
+                            scope_id=thread_id,
+                            limit=recent_limit + 100,
+                        ),
+                        summary_end=summary_end,
                     )
                 )
-            )
+            )[-recent_limit:]
             sections.append(("recent conversation", recent))
             tools = self.store.list_records(
                 kind=MemoryKind.TOOL_RESULT,
@@ -171,3 +200,37 @@ def _drop_oldest_conversation_turn(records: list[MemoryRecord]) -> list[MemoryRe
         if first_role == "user" and second_role == "assistant":
             return records[2:]
     return records[1:]
+
+
+def _exclude_summarized(
+    records: list[MemoryRecord],
+    *,
+    summary_end: int | None,
+) -> list[MemoryRecord]:
+    if summary_end is None:
+        return records
+    return [
+        record
+        for record in records
+        if record.source_event_start_id is None or record.source_event_start_id > summary_end
+    ]
+
+
+def _count_summarized_records(
+    records: list[MemoryRecord],
+    summary: MemoryRecord | None,
+) -> int:
+    if summary is None or summary.source_event_end_id is None:
+        return 0
+    return sum(
+        1
+        for record in records
+        if record.source_event_start_id is not None
+        and record.source_event_start_id <= summary.source_event_end_id
+    )
+
+
+def _compression_ratio(before: int, after: int) -> float | None:
+    if before <= 0:
+        return None
+    return round(after / before, 4)

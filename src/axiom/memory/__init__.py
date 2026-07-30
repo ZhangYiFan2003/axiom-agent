@@ -9,6 +9,13 @@ from axiom.memory.models import (
 )
 from axiom.memory.service import MemoryService
 from axiom.memory.store import MemoryStore
+from axiom.memory.summarizer import (
+    ConversationSegment,
+    ConversationSummarizer,
+    DeterministicConversationSummarizer,
+    SummaryPolicy,
+    SummaryRunResult,
+)
 
 __all__ = [
     "MemoryContextBuilder",
@@ -21,5 +28,10 @@ __all__ = [
     "MemoryScopeType",
     "MemoryService",
     "MemoryStore",
+    "ConversationSegment",
+    "ConversationSummarizer",
+    "DeterministicConversationSummarizer",
+    "SummaryPolicy",
+    "SummaryRunResult",
     "estimate_tokens",
 ]

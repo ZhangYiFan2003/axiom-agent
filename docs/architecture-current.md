@@ -188,6 +188,12 @@ flowchart TD
 - `src/axiom/runtime/api.py`
   - Provides a local Runtime API for threads, turns, events, and background
     tasks.
+  - Supports explicit `data_dir` injection, ephemeral localhost port binding,
+    start/shutdown/context-manager lifecycle, `/health`, fake engine injection
+    for no-network tests, and a thread/event repository boundary.
+  - Thread events are persisted with monotonic IDs and can be replayed through
+    stored SSE with `after_id` cursors. This is replay, not an unlimited live
+    event stream.
 - `src/axiom/runtime/tasks.py`
   - Stores durable background tasks in SQLite.
 
@@ -423,7 +429,11 @@ MCP server expansion points:
   should treat these files as sensitive and avoid reading their contents unless
   explicitly requested.
 - Runtime API persistence is local SQLite and bound to localhost; it is not a
-  distributed service.
+  distributed service, public deployment validation, load-tested API, or
+  distributed queue.
+- Runtime thread events are persisted, but thread history recovery, layered
+  Memory v2, Map-Reduce compression, and cross-thread/user preference memory are
+  not implemented yet.
 - Snapshot restore can overwrite workspace files and should be treated as a
   destructive capability.
 - Terminal text in some files appears to contain encoding artifacts, which may

@@ -17,7 +17,7 @@ Axiom is organized around a few core paths:
 - AST code index, hybrid retrieval, symbol graph, and graph-aware context builder for repository understanding.
 - Memory, snapshots, skills, MCP, and Runtime API modules for runtime state and integrations.
 
-The core Agent Runtime paths are covered by offline tests with fake LLM clients. Some integration surfaces, such as MCP server transport lifecycle and live Runtime API serving, are intentionally marked as partially verified until they have stable end-to-end transport tests.
+The core Agent Runtime paths are covered by offline tests with fake LLM clients. Runtime API localhost lifecycle is covered with live HTTP tests. Some integration surfaces, such as MCP server transport lifecycle and public Runtime API deployment behavior, are intentionally marked as partially verified until they have stable end-to-end transport or deployment tests.
 
 ## Features
 
@@ -36,7 +36,7 @@ The core Agent Runtime paths are covered by offline tests with fake LLM clients.
 | Multi-Agent | Coordinates planner, worker, and reviewer roles, including retries and worker failure summaries. | Tested |
 | MCP Client | Discovers and calls tools from local stdio MCP servers in tests. | Tested |
 | MCP Server | Exposes built-in tools through handler-level JSON-RPC requests. | Handler tested |
-| Runtime API | Provides task and thread-oriented runtime endpoints; task handler paths are covered. | Handler tested |
+| Runtime API | Provides task and thread-oriented runtime endpoints with live localhost lifecycle, health, auth, task CRUD/cancel, thread turn, and stored event replay tests. | Live localhost tested |
 | Streaming | Parses OpenAI-compatible streaming events and renders incremental output. | Partially tested |
 | REPL | Interactive prompt-toolkit entrypoint and slash commands. | Not fully verified |
 
@@ -145,7 +145,7 @@ Start the interactive CLI:
 uv run axiom
 ```
 
-Runtime API and MCP helpers are available from the CLI, but their live transport lifecycle is still treated as partially verified in the current baseline:
+Runtime API and MCP helpers are available from the CLI. Runtime API localhost lifecycle is tested; MCP server long-running transport lifecycle remains partially verified:
 
 ```bash
 uv run axiom serve --help
@@ -163,10 +163,10 @@ uv run pytest
 Current baseline:
 
 ```text
-104 tests passing
+110 tests passing
 ```
 
-The default tests use fake LLM clients, temporary directories, temporary SQLite databases, deterministic code-search fixtures, and localhost-safe handler paths. They do not require API keys and do not call external model providers.
+The default tests use fake LLM clients, temporary directories, temporary SQLite databases, deterministic code-search fixtures, and localhost-safe HTTP paths. They do not require API keys and do not call external model providers.
 
 GitHub Actions runs the same test suite on push and pull request events for `main`.
 
@@ -183,12 +183,13 @@ Verified in the current baseline:
 - Multi-agent orchestration
 - MCP client stdio discovery/call path
 - AST code indexing, lexical/vector/hybrid search, symbol resolution, conservative static call graph, and graph-aware code context assembly
-- Runtime task store and direct API handler paths
+- Runtime task store, live localhost Runtime API lifecycle, and stored SSE event replay
 
 Partially verified or intentionally bounded:
 
 - MCP server long-running stdio/http transport lifecycle remains partially verified.
-- Runtime API live HTTP server and LLM-backed thread turns remain partially verified.
+- Runtime API public deployment, load testing, distributed queues, real-provider CI, and unlimited live streaming are not verified.
+- Runtime thread history recovery, layered Memory v2, Map-Reduce compression, and cross-thread/user preference memory are not implemented yet.
 - Interactive REPL behavior is less extensively covered than non-interactive paths.
 - Real provider streaming has manual smoke coverage plus unit-level streaming/rendering paths, but not exhaustive provider matrix coverage.
 - Not every built-in tool has a full end-to-end test.

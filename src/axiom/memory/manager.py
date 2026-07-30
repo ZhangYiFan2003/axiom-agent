@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from axiom.memory.models import MemoryKind, MemoryScopeType
+from axiom.memory.store import MemoryStore
+
 
 @dataclass(slots=True)
 class MemoryEntry:
@@ -19,6 +22,7 @@ class MemoryManager:
         self.db_path = Path(db_path).expanduser()
         self.scope = scope
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.store = MemoryStore(self.db_path)
         self._ensure_schema()
 
     def save(self, content: str) -> int:
@@ -28,7 +32,22 @@ class MemoryManager:
                 "insert into memories(scope, content, created_at) values (?, ?, ?)",
                 (self.scope, content.strip(), created_at),
             )
-            return int(cursor.lastrowid)
+            memory_id = int(cursor.lastrowid)
+        self.store.save_record(
+            kind=MemoryKind.FACT,
+            scope_type=MemoryScopeType.PROJECT,
+            scope_id=self.scope,
+            content=content,
+            metadata={
+                "active": True,
+                "category": "fact",
+                "confidence": 1.0,
+                "legacy_id": memory_id,
+                "source": "legacy_memory_manager",
+            },
+            record_id=f"legacy_{memory_id}",
+        )
+        return memory_id
 
     def list(self, limit: int = 20) -> list[MemoryEntry]:
         with self._connect() as conn:
@@ -71,7 +90,9 @@ class MemoryManager:
     def clear(self) -> int:
         with self._connect() as conn:
             cursor = conn.execute("delete from memories where scope = ?", (self.scope,))
-            return int(cursor.rowcount)
+            rowcount = int(cursor.rowcount)
+        self.store.clear_scope(MemoryScopeType.PROJECT, self.scope)
+        return rowcount
 
     def _ensure_schema(self) -> None:
         with self._connect() as conn:

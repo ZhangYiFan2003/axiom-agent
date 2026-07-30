@@ -20,7 +20,7 @@ from axiom.agent import Agent, AgentOrchestrator, PlanExecuteAgent
 from axiom.bootstrap import build_tool_registry
 from axiom.config import AxiomConfig, config_to_public_dict
 from axiom.llm import create_llm_client
-from axiom.memory import MemoryManager
+from axiom.memory import MemoryKind, MemoryManager, MemoryScopeType, MemoryService
 from axiom.policy import AuditLog
 from axiom.prompt import PromptAssembler
 from axiom.rag.code_index_factory import create_code_index
@@ -388,6 +388,7 @@ async def _handle_slash(
 
 async def _memory_command(arg: str, console: Console, cwd: str, config: AxiomConfig) -> None:
     manager = MemoryManager(config.memory.long_term_db_path, scope=cwd)
+    service = MemoryService(config.memory.long_term_db_path, project_scope=cwd)
     sub, _, rest = arg.partition(" ")
     if sub == "clear":
         count = manager.clear()
@@ -395,9 +396,45 @@ async def _memory_command(arg: str, console: Console, cwd: str, config: AxiomCon
     elif sub == "search":
         rows = manager.search(rest)
         console.print("\n".join(f"#{row.id} {row.content}" for row in rows) or "(no matches)")
+    elif sub == "list" and rest:
+        try:
+            kind = MemoryKind(rest.strip())
+        except ValueError:
+            console.print("[red]Unknown memory kind.[/red]")
+            return
+        rows = service.list_records(
+            kind=kind,
+            scope_type=MemoryScopeType.PROJECT,
+            scope_id=cwd,
+        )
+        console.print("\n".join(f"{row.id} {row.content}" for row in rows) or "(no memories)")
+    elif sub == "save":
+        kind_text, _, content = rest.partition(" ")
+        if kind_text in {"fact", "preference"} and content:
+            record = service.save_fact(content, category=kind_text)
+            console.print(f"Saved {kind_text} {record.id}")
+        else:
+            console.print("[red]Usage:[/red] /memory save fact <text>")
+    elif sub == "context":
+        result = service.build_context(query=rest)
+        console.print(_format_memory_context(result) or "(no memory context)")
     else:
         rows = manager.list()
         console.print("\n".join(f"#{row.id} {row.content}" for row in rows) or "(no memories)")
+
+
+def _format_memory_context(result) -> str:
+    lines = [
+        (
+            f"Memory context: {result.included_count} records, "
+            f"{result.estimated_chars} chars, ~{result.estimated_tokens} tokens, "
+            f"truncated={result.truncated}"
+        )
+    ]
+    for section in result.sections:
+        if section.content:
+            lines.append(section.content.rstrip())
+    return "\n".join(lines)
 
 
 def _hitl_command(arg: str, console: Console, config: AxiomConfig) -> None:

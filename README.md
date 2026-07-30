@@ -15,7 +15,7 @@ Axiom is organized around a few core paths:
 - OpenAI-compatible LLM client abstraction for real provider calls when configured.
 - Tool registry and executor for model-requested local tool calls.
 - AST code index, hybrid retrieval, symbol graph, and graph-aware context builder for repository understanding.
-- Memory, snapshots, skills, MCP, and Runtime API modules for runtime state and integrations.
+- Layered memory foundation, snapshots, skills, MCP, and Runtime API modules for runtime state and integrations.
 
 The core Agent Runtime paths are covered by offline tests with fake LLM clients. Runtime API localhost lifecycle is covered with live HTTP tests. Some integration surfaces, such as MCP server transport lifecycle and public Runtime API deployment behavior, are intentionally marked as partially verified until they have stable end-to-end transport or deployment tests.
 
@@ -29,7 +29,7 @@ The core Agent Runtime paths are covered by offline tests with fake LLM clients.
 | Tool Calling | Merges streamed tool-call deltas, executes registered tools, and replays tool results to the model. | Tested |
 | Built-in Tools | Includes file, shell, search, memory, skill, web, AST lexical/vector code search, static symbol/reference lookup, high-confidence static call graph queries, and snapshot tools. | Partially tested |
 | Graph-Aware Code Context | Assembles search seeds, symbol definitions, references, callers, callees, and bounded call paths into budgeted agent context with reasons. | Tested |
-| Memory | Stores, reads, searches, clears, and isolates scoped long-term memory in SQLite. | Tested |
+| Memory | Stores typed conversation, summary, fact/preference, and tool-result digest records with scoped SQLite persistence, Runtime thread history recovery, and budgeted context assembly. | Tested |
 | Snapshots | Creates, restores, lists, and cleans workspace snapshots under an isolated home in tests. | Tested |
 | Skills | Loads built-in, user, and project `SKILL.md` files and supports skill context injection. | Tested |
 | Plan-Execute | Parses task DAGs, runs independent tasks in parallel, respects dependencies, and aggregates results. | Tested |
@@ -66,7 +66,7 @@ Key modules:
 - `src/axiom/tools/`: tool model, registry, executor, and built-in tools.
 - `src/axiom/rag/`: AST chunks, lexical/vector/hybrid search, symbol index, call graph, and graph-aware code context.
 - `src/axiom/mcp/`: MCP client, MCP config, and MCP server handler support.
-- `src/axiom/memory/`: scoped long-term memory persistence.
+- `src/axiom/memory/`: scoped typed memory persistence, Runtime history recovery, and budgeted memory context assembly.
 - `src/axiom/snapshot/`: workspace snapshot service.
 - `src/axiom/runtime/`: local Runtime API and durable task store.
 
@@ -163,7 +163,7 @@ uv run pytest
 Current baseline:
 
 ```text
-110 tests passing
+124 tests passing
 ```
 
 The default tests use fake LLM clients, temporary directories, temporary SQLite databases, deterministic code-search fixtures, and localhost-safe HTTP paths. They do not require API keys and do not call external model providers.
@@ -176,7 +176,7 @@ Verified in the current baseline:
 
 - ReAct loop
 - Tool calling
-- Memory
+- Runtime-integrated typed memory foundation
 - Snapshots
 - Skills
 - Plan-and-Execute
@@ -184,12 +184,13 @@ Verified in the current baseline:
 - MCP client stdio discovery/call path
 - AST code indexing, lexical/vector/hybrid search, symbol resolution, conservative static call graph, and graph-aware code context assembly
 - Runtime task store, live localhost Runtime API lifecycle, and stored SSE event replay
+- Runtime thread history recovery from persisted event IDs, explicit fact/preference storage, summary storage interfaces, and bounded tool-result digests
 
 Partially verified or intentionally bounded:
 
 - MCP server long-running stdio/http transport lifecycle remains partially verified.
 - Runtime API public deployment, load testing, distributed queues, real-provider CI, and unlimited live streaming are not verified.
-- Runtime thread history recovery, layered Memory v2, Map-Reduce compression, and cross-thread/user preference memory are not implemented yet.
+- Automatic summary generation, Map-Reduce compression, automatic fact extraction, semantic memory retrieval, and cross-thread/user preference evaluation are not implemented yet.
 - Interactive REPL behavior is less extensively covered than non-interactive paths.
 - Real provider streaming has manual smoke coverage plus unit-level streaming/rendering paths, but not exhaustive provider matrix coverage.
 - Not every built-in tool has a full end-to-end test.
@@ -248,7 +249,7 @@ Near-term directions:
 
 - Provider adapter improvements
 - Richer MCP transport lifecycle verification
-- Runtime API integration testing
+- Runtime-integrated Memory v2 follow-up for Map-Reduce summaries and fact extraction
 - Retrieval evaluation and graph-aware context quality improvements
 - Observability for agent runs, tools, and runtime events
 

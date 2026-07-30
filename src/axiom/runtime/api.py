@@ -19,7 +19,9 @@ from axiom.agent import QueryEngine
 from axiom.bootstrap import build_tool_registry
 from axiom.config import AxiomConfig
 from axiom.llm import create_llm_client
+from axiom.memory import MemoryService
 from axiom.runtime.tasks import DurableTaskManager
+from axiom.types import Message
 
 
 @dataclass(slots=True)
@@ -35,7 +37,7 @@ class RuntimeEvent:
 class RuntimeTurnContext:
     thread_id: str | None
     message: str
-    history: list[RuntimeEvent]
+    history: list[Message]
     cwd: str
     config: AxiomConfig
 
@@ -163,6 +165,7 @@ class RuntimeApiServer:
         task_manager: DurableTaskManager | None = None,
         engine_factory: EngineFactory | None = None,
         tool_registry_factory: ToolRegistryFactory | None = None,
+        memory_service: MemoryService | None = None,
     ):
         self.cwd = str(Path(cwd).resolve())
         self.config = config
@@ -175,12 +178,18 @@ class RuntimeApiServer:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.repository = ThreadEventRepository(self.data_dir / "runtime.db")
         self.task_manager = task_manager or DurableTaskManager(self.data_dir / "tasks.db")
+        self.memory_service = memory_service or MemoryService(
+            self.data_dir / "memory.db",
+            project_scope=self.cwd,
+        )
         self.engine_factory = engine_factory
         self.tool_registry_factory = tool_registry_factory or build_tool_registry
         self._stop = threading.Event()
         self._httpd: ThreadingHTTPServer | None = None
         self._server_thread: threading.Thread | None = None
         self._worker_threads: list[threading.Thread] = []
+        self._thread_locks: dict[str, threading.Lock] = {}
+        self._thread_locks_guard = threading.Lock()
 
     @property
     def address(self) -> tuple[str, int]:
@@ -300,8 +309,15 @@ class RuntimeApiServer:
                 if not message:
                     _send_json(request, 400, {"error": "message is required"})
                     return
-                result = asyncio.run(self._run_turn(thread_id, message))
-                _send_json(request, 200, result)
+                lock = self._thread_lock(thread_id)
+                if not lock.acquire(blocking=False):
+                    _send_json(request, 409, {"error": "thread turn already running"})
+                    return
+                try:
+                    result = asyncio.run(self._run_turn(thread_id, message))
+                    _send_json(request, 200, result)
+                finally:
+                    lock.release()
             elif method == "GET" and path.startswith("/v1/threads/") and path.endswith("/events"):
                 thread_id = path.split("/")[3]
                 after_id = _first_int(query.get("after_id"))
@@ -331,7 +347,8 @@ class RuntimeApiServer:
             _send_json(request, 500, {"error": _safe_error(exc)})
 
     async def _run_turn(self, thread_id: str, message: str) -> dict[str, Any]:
-        history = self.repository.list_events(thread_id)
+        history_events = self.repository.list_events(thread_id)
+        history = self.memory_service.history_from_runtime_events(history_events)
         context = RuntimeTurnContext(
             thread_id=thread_id,
             message=message,
@@ -340,24 +357,55 @@ class RuntimeApiServer:
             config=self.config,
         )
         self.repository.append_event(thread_id, "turn.started", {"message_chars": len(message)})
-        self.repository.append_event(thread_id, "user.message", {"text": message})
+        user_event_id = self.repository.append_event(thread_id, "user.message", {"text": message})
+        self._derive_conversation_memory(
+            thread_id,
+            role="user",
+            content=message,
+            event_id=user_event_id,
+        )
         engine = await self._engine(context)
         text = ""
         done_payload: dict[str, Any] = {}
-        async for event in engine.ask(message):
-            event_type = str(event.get("type"))
-            if event_type == "text_delta":
-                delta = str(event.get("text") or "")
-                text += delta
-            elif event_type == "tool_call":
-                self.repository.append_event(thread_id, "tool_call", _jsonable(event))
-            elif event_type == "tool_result":
-                self.repository.append_event(thread_id, "tool_result", _jsonable(event))
-            elif event_type == "error":
-                self.repository.append_event(thread_id, "error", _jsonable(event))
-            elif event_type == "done":
-                done_payload = _jsonable(event)
-        self.repository.append_event(thread_id, "assistant.message", {"text": text})
+        try:
+            async for event in _ask_events(engine, message, history):
+                event_type = str(event.get("type"))
+                if event_type == "text_delta":
+                    delta = str(event.get("text") or "")
+                    text += delta
+                elif event_type == "tool_call":
+                    self.repository.append_event(thread_id, "tool_call", _jsonable(event))
+                elif event_type == "tool_result":
+                    event_id = self.repository.append_event(
+                        thread_id,
+                        "tool_result",
+                        _jsonable(event),
+                    )
+                    self._derive_tool_result_memory(
+                        thread_id,
+                        tool_name=str(event.get("name") or "unknown"),
+                        success=not bool(event.get("error")),
+                        content=_tool_result_content(event),
+                        source_event_id=event_id,
+                    )
+                elif event_type == "error":
+                    self.repository.append_event(thread_id, "error", _jsonable(event))
+                elif event_type == "done":
+                    done_payload = _jsonable(event)
+        except Exception as exc:
+            self.repository.append_event(thread_id, "error", {"error": _safe_error(exc)})
+            raise
+        assistant_event_id = self.repository.append_event(
+            thread_id,
+            "assistant.message",
+            {"text": text},
+        )
+        self._derive_conversation_memory(
+            thread_id,
+            role="assistant",
+            content=text,
+            event_id=assistant_event_id,
+        )
         self.repository.append_event(thread_id, "turn.completed", done_payload)
         return {"thread_id": thread_id, "text": text}
 
@@ -419,6 +467,52 @@ class RuntimeApiServer:
 
     def _append_event(self, thread_id: str, event_type: str, payload: dict[str, Any]) -> None:
         self.repository.append_event(thread_id, event_type, payload)
+
+    def _thread_lock(self, thread_id: str) -> threading.Lock:
+        with self._thread_locks_guard:
+            lock = self._thread_locks.get(thread_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._thread_locks[thread_id] = lock
+            return lock
+
+    def _derive_conversation_memory(
+        self,
+        thread_id: str,
+        *,
+        role: str,
+        content: str,
+        event_id: int,
+    ) -> None:
+        try:
+            self.memory_service.save_conversation(
+                thread_id,
+                role=role,
+                content=content,
+                event_id=event_id,
+            )
+        except Exception:
+            return
+
+    def _derive_tool_result_memory(
+        self,
+        thread_id: str,
+        *,
+        tool_name: str,
+        success: bool,
+        content: str,
+        source_event_id: int,
+    ) -> None:
+        try:
+            self.memory_service.save_tool_result(
+                thread_id,
+                tool_name=tool_name,
+                success=success,
+                content=content,
+                source_event_id=source_event_id,
+            )
+        except Exception:
+            return
 
     def _send_events(
         self,
@@ -515,6 +609,29 @@ def _safe_error(exc: Exception) -> str:
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+async def _ask_events(engine: Any, message: str, history: list[Message]):
+    method = engine.ask
+    signature = inspect.signature(method)
+    accepts_history = "history" in signature.parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
+    if accepts_history:
+        async for event in method(message, history=history):
+            yield event
+        return
+    async for event in method(message):
+        yield event
+
+
+def _tool_result_content(event: dict[str, Any]) -> str:
+    for key in ["content", "result", "output", "text"]:
+        value = event.get(key)
+        if isinstance(value, str):
+            return value
+    return json.dumps(_jsonable(event), ensure_ascii=False)
 
 
 def runtime_api_key(explicit: str | None = None) -> str:

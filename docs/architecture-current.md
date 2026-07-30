@@ -6,7 +6,7 @@ Axiom Agent Runtime is a terminal AI agent CLI implemented as a Python package w
 `src` layout. The installed console command is `axiom`, backed by Typer command
 registration. It supports an interactive REPL, a one-shot prompt mode, OpenAI
 compatible streaming chat completions, function-style tool calling, local
-workspace tools, MCP client/server integration, memory, snapshots, planning,
+workspace tools, MCP client/server integration, layered memory foundation, snapshots, planning,
 multi-agent orchestration, and a lightweight Runtime API.
 
 Core runtime choices:
@@ -100,7 +100,7 @@ flowchart TD
     team execution modes.
 - `src/axiom/agent/agent.py`
   - Wraps one ReAct run with pre-turn and post-turn snapshots.
-  - Stores conversation history after a completed turn.
+  - Stores in-process conversation history after a completed turn.
 - `src/axiom/agent/query.py`
   - Implements the core ReAct loop.
   - Creates the user message, passes messages/tools/system prompt to the LLM,
@@ -118,7 +118,7 @@ flowchart TD
 
 - `src/axiom/prompt/assembler.py`
   - Builds the system prompt from runtime context, working directory, model,
-    provider, available tool names, project memory files, long-term memory, and
+    provider, available tool names, project memory files, typed long-term memory, and
     the skill index.
 
 ### Tools
@@ -173,7 +173,16 @@ flowchart TD
 ### Memory, skills, snapshots, policy, and runtime
 
 - `src/axiom/memory/manager.py`
-  - Stores scoped long-term memory in SQLite.
+  - Backwards-compatible facade for legacy scoped memory commands and tools.
+- `src/axiom/memory/store.py`
+  - Stores typed memory records in SQLite and migrates legacy memory rows
+    additively.
+- `src/axiom/memory/service.py`
+  - Provides fact/preference, summary, conversation, and tool-result digest
+    APIs plus Runtime event to message-history recovery.
+- `src/axiom/memory/context.py`
+  - Builds deterministic memory context under character, estimated-token, and
+    record budgets.
 - `src/axiom/skill/registry.py`
   - Loads built-in, user, and project `SKILL.md` files and tracks disabled
     skills.
@@ -194,6 +203,9 @@ flowchart TD
   - Thread events are persisted with monotonic IDs and can be replayed through
     stored SSE with `after_id` cursors. This is replay, not an unlimited live
     event stream.
+  - Restores prior user/assistant messages from persisted thread events before
+    each turn and writes bounded typed memory records for conversation messages
+    and tool-result digests.
 - `src/axiom/runtime/tasks.py`
   - Stores durable background tasks in SQLite.
 
@@ -431,9 +443,10 @@ MCP server expansion points:
 - Runtime API persistence is local SQLite and bound to localhost; it is not a
   distributed service, public deployment validation, load-tested API, or
   distributed queue.
-- Runtime thread events are persisted, but thread history recovery, layered
-  Memory v2, Map-Reduce compression, and cross-thread/user preference memory are
-  not implemented yet.
+- Runtime thread history recovery and the typed memory foundation are
+  implemented locally, but automatic summary generation, Map-Reduce compression,
+  automatic fact extraction, semantic memory retrieval, and cross-thread/user
+  preference evaluation are not implemented yet.
 - Snapshot restore can overwrite workspace files and should be treated as a
   destructive capability.
 - Terminal text in some files appears to contain encoding artifacts, which may

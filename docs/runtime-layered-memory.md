@@ -21,6 +21,11 @@ boundary.
 Each `MemoryRecord` keeps a stable ID, kind, scope, content, timestamps, optional
 source event range, and metadata.
 
+Fact and preference records now support conservative automatic extraction from
+completed Runtime user events. Extracted records retain normalized keys,
+category, confidence, explicitness, source event provenance, and active/inactive
+metadata.
+
 ## Runtime recovery
 
 Runtime turns now restore prior conversation history from persisted thread
@@ -56,6 +61,21 @@ conversation records covered by the active summary are skipped, older
 conversation turns are removed before newer turns, summaries are preferred when
 they fit, and bounded tool digests are lower priority than explicit facts.
 
+Fact context includes active thread constraints, project facts/decisions, and
+local user preferences. Superseded and retracted facts are excluded. Thread
+constraints do not leak to other Runtime threads.
+
+## Fact lifecycle
+
+For a single scope and normalized key, only one active value is kept.
+Duplicate equivalent facts merge into the active record and update supporting
+provenance. Conflicting explicit values insert the new active fact and mark the
+old active fact superseded in one SQLite transaction. If the transaction fails,
+the old active value remains active.
+
+Explicit retractions mark active facts inactive/retracted without deleting raw
+Runtime events.
+
 ## Tool-result digests
 
 Tool-result memory stores a bounded preview, result size, success status, tool
@@ -90,10 +110,10 @@ distributed cross-process thread lock.
 
 This foundation intentionally does not implement:
 
-- automatic fact extraction
 - semantic or vector memory retrieval
 - cloud or distributed memory
 - cross-user security isolation
 - memory encryption
 - full privacy redaction for arbitrary content
 - real-provider CI
+- production LLM fact-extraction accuracy evaluation

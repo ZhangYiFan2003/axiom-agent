@@ -7,6 +7,14 @@ from pathlib import Path
 from typing import Any
 
 from axiom.memory.context import MemoryContextBuilder
+from axiom.memory.facts import (
+    DeterministicFactExtractor,
+    FactCandidate,
+    FactExtractionRunResult,
+    FactExtractor,
+    normalize_fact_key,
+    validate_fact_candidate,
+)
 from axiom.memory.models import MemoryContextResult, MemoryKind, MemoryRecord, MemoryScopeType
 from axiom.memory.store import MemoryStore
 from axiom.memory.summarizer import (
@@ -36,6 +44,7 @@ class MemoryService:
         user_scope: str = "local",
         summarizer: ConversationSummarizer | None = None,
         summary_policy: SummaryPolicy | None = None,
+        fact_extractor: FactExtractor | None = None,
     ):
         self.store = MemoryStore(db_path)
         self.project_scope = project_scope
@@ -43,6 +52,7 @@ class MemoryService:
         self.context_builder = MemoryContextBuilder(self.store)
         self.summarizer = summarizer or DeterministicConversationSummarizer()
         self.summary_policy = (summary_policy or SummaryPolicy()).normalized()
+        self.fact_extractor = fact_extractor or DeterministicFactExtractor()
 
     def save_fact(
         self,
@@ -57,6 +67,36 @@ class MemoryService:
         metadata: dict[str, object] | None = None,
     ) -> MemoryRecord:
         target_scope = scope_id or self._default_scope(scope_type)
+        if key:
+            normalized_key = normalize_fact_key(category, key)
+            candidate = validate_fact_candidate(
+                FactCandidate(
+                    key=normalized_key,
+                    value=content,
+                    category=category,
+                    scope_type=scope_type,
+                    confidence=confidence,
+                    explicit=True,
+                    source_event_start_id=-1,
+                    source_event_end_id=-1,
+                    evidence=str(metadata.get("evidence")) if metadata else None,
+                )
+            )
+            if candidate is None:
+                raise ValueError("memory fact was rejected by validation policy")
+            return self.store.save_fact_value(
+                scope_type=scope_type,
+                scope_id=target_scope,
+                key=candidate.key,
+                category=candidate.category,
+                content=candidate.value,
+                confidence=candidate.confidence,
+                metadata={
+                    "source": source,
+                    "explicit": True,
+                    **dict(metadata or {}),
+                },
+            )
         record = self.store.save_record(
             kind=MemoryKind.FACT,
             scope_type=scope_type,
@@ -71,14 +111,37 @@ class MemoryService:
                 **dict(metadata or {}),
             },
         )
-        if key:
-            self.store.supersede_fact(
-                scope_type=scope_type,
-                scope_id=target_scope,
-                key=key,
-                superseded_by=record.id,
-            )
         return record
+
+    def forget_fact(
+        self,
+        key_or_id: str,
+        *,
+        scope_type: MemoryScopeType = MemoryScopeType.PROJECT,
+        scope_id: str | None = None,
+        category: str | None = None,
+    ) -> int:
+        return self.store.retract_fact(
+            scope_type=scope_type,
+            scope_id=scope_id or self._default_scope(scope_type),
+            key_or_id=key_or_id,
+            category=category,
+        )
+
+    def fact_history(
+        self,
+        key_or_id: str,
+        *,
+        scope_type: MemoryScopeType = MemoryScopeType.PROJECT,
+        scope_id: str | None = None,
+        limit: int = 50,
+    ) -> list[MemoryRecord]:
+        return self.store.fact_history(
+            scope_type=scope_type,
+            scope_id=scope_id or self._default_scope(scope_type),
+            key_or_id=key_or_id,
+            limit=limit,
+        )
 
     def save_summary(
         self,
@@ -230,6 +293,101 @@ class MemoryService:
             return await self._summarize_thread_unchecked(thread_id)
         except Exception as exc:  # noqa: BLE001 - summarization is derived state
             return SummaryRunResult(created=False, error=exc.__class__.__name__)
+
+    async def extract_facts_from_thread(
+        self,
+        thread_id: str,
+        events: Iterable[Any],
+    ) -> FactExtractionRunResult:
+        try:
+            return await self._extract_facts_from_thread_unchecked(thread_id, events)
+        except Exception as exc:  # noqa: BLE001 - extraction is derived state
+            return FactExtractionRunResult(error=exc.__class__.__name__)
+
+    async def _extract_facts_from_thread_unchecked(
+        self,
+        thread_id: str,
+        events: Iterable[Any],
+    ) -> FactExtractionRunResult:
+        last_event_id = _int_or_none(self.store.get_meta(_fact_checkpoint_key(thread_id)))
+        user_messages: list[Message] = []
+        max_event_id = last_event_id
+        for event in events:
+            event_id = getattr(event, "id", None)
+            if not isinstance(event_id, int):
+                continue
+            if last_event_id is not None and event_id <= last_event_id:
+                continue
+            event_type = str(getattr(event, "type", ""))
+            payload = getattr(event, "payload", {})
+            if not isinstance(payload, dict):
+                continue
+            max_event_id = event_id if max_event_id is None else max(max_event_id, event_id)
+            if event_type != "user.message":
+                continue
+            text = payload.get("text")
+            if not isinstance(text, str) or not text:
+                continue
+            user_messages.append(Message(role="user", content=text, name=f"event:{event_id}"))
+        if not user_messages:
+            if max_event_id is not None:
+                self.store.set_meta(_fact_checkpoint_key(thread_id), str(max_event_id))
+            return FactExtractionRunResult(processed_event_end_id=max_event_id)
+        summary = self.store.active_summary(thread_id=thread_id)
+        candidates = list(
+            await self.fact_extractor.extract(
+                user_messages,
+                summary=summary.content if summary is not None else None,
+            )
+        )
+        result = FactExtractionRunResult(
+            processed_event_end_id=max_event_id,
+            candidate_count=len(candidates),
+        )
+        for candidate in candidates:
+            validated = validate_fact_candidate(candidate)
+            if validated is None:
+                result.rejected_count += 1
+                continue
+            scope_id = self._default_scope(validated.scope_type)
+            if validated.scope_type == MemoryScopeType.THREAD:
+                scope_id = thread_id
+            if validated.action == "retract":
+                result.retracted_count += self.store.retract_fact(
+                    scope_type=validated.scope_type,
+                    scope_id=scope_id,
+                    key_or_id=validated.key,
+                    category=validated.category,
+                    source_event_start_id=validated.source_event_start_id,
+                    source_event_end_id=validated.source_event_end_id,
+                )
+                result.accepted_count += 1
+                continue
+            self.store.save_fact_value(
+                scope_type=validated.scope_type,
+                scope_id=scope_id,
+                key=validated.key,
+                category=validated.category,
+                content=validated.value,
+                confidence=validated.confidence,
+                source_event_start_id=validated.source_event_start_id,
+                source_event_end_id=validated.source_event_end_id,
+                metadata={
+                    "source": "runtime_fact_extractor",
+                    "explicit": validated.explicit,
+                    "evidence": validated.evidence,
+                    "extractor_version": getattr(
+                        self.fact_extractor,
+                        "version",
+                        self.fact_extractor.__class__.__name__,
+                    ),
+                },
+            )
+            result.accepted_count += 1
+            result.merged_or_saved_count += 1
+        if max_event_id is not None:
+            self.store.set_meta(_fact_checkpoint_key(thread_id), str(max_event_id))
+        return result
 
     async def _summarize_thread_unchecked(self, thread_id: str) -> SummaryRunResult:
         policy = self.summary_policy
@@ -460,3 +618,17 @@ def _bounded_reduce_input(items: list[str], *, max_estimated_tokens: int) -> lis
         bounded.append(item)
         total += tokens
     return bounded
+
+
+def _fact_checkpoint_key(thread_id: str) -> str:
+    safe_thread_id = hashlib.sha256(thread_id.encode("utf-8")).hexdigest()
+    return f"fact_extracted:{safe_thread_id}"
+
+
+def _int_or_none(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None

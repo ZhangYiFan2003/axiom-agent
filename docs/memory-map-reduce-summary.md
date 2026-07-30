@@ -88,12 +88,14 @@ range, so there is no intentional raw-message overlap with summarized events. It
 reports summary usage, source range, raw messages included, raw messages skipped
 because summarized, estimated before/after tokens, and compression ratio.
 
+After Stage 4B-2B, summary text may be supplied as context to the fact extractor,
+but accepted facts must still trace back to original user events. Summary
+records are not treated as an independent source of user preference truth.
+
 ## Current limitations
 
 This stage intentionally does not implement:
 
-- automatic fact extraction
-- preference inference or reuse
 - semantic/vector memory retrieval
 - distributed summarization workers
 - background scheduling

@@ -408,6 +408,39 @@ async def _memory_command(arg: str, console: Console, cwd: str, config: AxiomCon
             scope_id=cwd,
         )
         console.print("\n".join(f"{row.id} {row.content}" for row in rows) or "(no memories)")
+    elif sub in {"facts", "preferences"}:
+        category = "preference" if sub == "preferences" else None
+        rows = service.list_records(
+            kind=MemoryKind.FACT,
+            scope_type=MemoryScopeType.PROJECT,
+            scope_id=cwd,
+            include_inactive=False,
+            limit=50,
+        )
+        if sub == "preferences":
+            rows.extend(
+                service.list_records(
+                    kind=MemoryKind.FACT,
+                    scope_type=MemoryScopeType.USER,
+                    scope_id=service.user_scope,
+                    include_inactive=False,
+                    limit=50,
+                )
+            )
+        if category:
+            rows = [row for row in rows if row.metadata.get("category") == category]
+        console.print(_format_memory_records(rows) or "(no memories)")
+    elif sub == "show" and rest:
+        key = rest.strip()
+        rows = _fact_history_for_repl(service, key)
+        console.print(_format_memory_records(rows[:1]) or "(no memory)")
+    elif sub == "forget" and rest:
+        key = rest.strip()
+        message = _forget_for_repl(service, key)
+        console.print(message)
+    elif sub == "history" and rest:
+        rows = _fact_history_for_repl(service, rest.strip())
+        console.print(_format_memory_records(rows) or "(no history)")
     elif sub == "save":
         kind_text, _, content = rest.partition(" ")
         if kind_text in {"fact", "preference"} and content:
@@ -435,6 +468,63 @@ def _format_memory_context(result) -> str:
         if section.content:
             lines.append(section.content.rstrip())
     return "\n".join(lines)
+
+
+def _format_memory_records(rows) -> str:
+    lines = []
+    for row in rows:
+        key = row.metadata.get("key")
+        category = row.metadata.get("category")
+        active = row.metadata.get("active", True)
+        label = f"{category or row.kind.value} {key or ''}".strip()
+        lines.append(f"{row.id} [{label} active={active}] {row.content}")
+    return "\n".join(lines)
+
+
+def _fact_history_for_repl(service: MemoryService, key: str):
+    rows = service.fact_history(key, limit=50)
+    rows.extend(service.fact_history(key, scope_type=MemoryScopeType.USER, limit=50))
+    rows.sort(key=lambda row: (row.updated_at, row.id), reverse=True)
+    return rows
+
+
+def _forget_for_repl(service: MemoryService, key: str) -> str:
+    matches = _active_fact_matches_for_repl(service, key)
+    if not matches:
+        return "Forgot 0 memories."
+    if len(matches) > 1 and not any(row.id == key for row in matches):
+        return (
+            "Ambiguous memory key. Use one of these IDs:\n"
+            + _format_memory_records(matches)
+        )
+    target = next((row for row in matches if row.id == key), matches[0])
+    count = service.forget_fact(
+        target.id,
+        scope_type=target.scope_type,
+        scope_id=target.scope_id,
+    )
+    return f"Forgot {count} memories."
+
+
+def _active_fact_matches_for_repl(service: MemoryService, key: str):
+    rows = []
+    for scope_type, scope_id in [
+        (MemoryScopeType.PROJECT, service.project_scope),
+        (MemoryScopeType.USER, service.user_scope),
+    ]:
+        rows.extend(
+            row
+            for row in service.list_records(
+                kind=MemoryKind.FACT,
+                scope_type=scope_type,
+                scope_id=scope_id,
+                include_inactive=False,
+                limit=100,
+            )
+            if row.id == key or row.metadata.get("key") == key
+        )
+    rows.sort(key=lambda row: (row.scope_type.value, row.scope_id, row.id))
+    return rows
 
 
 def _hitl_command(arg: str, console: Console, config: AxiomConfig) -> None:

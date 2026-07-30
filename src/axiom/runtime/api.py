@@ -409,6 +409,7 @@ class RuntimeApiServer:
         )
         self.repository.append_event(thread_id, "turn.completed", done_payload)
         await self._summarize_thread_best_effort(thread_id)
+        await self._extract_facts_best_effort(thread_id)
         return {"thread_id": thread_id, "text": text}
 
     def _worker_loop(self) -> None:
@@ -522,6 +523,17 @@ class RuntimeApiServer:
             return
         try:
             result = summarize(thread_id)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            return
+
+    async def _extract_facts_best_effort(self, thread_id: str) -> None:
+        extract = getattr(self.memory_service, "extract_facts_from_thread", None)
+        if extract is None:
+            return
+        try:
+            result = extract(thread_id, self.repository.list_events(thread_id))
             if inspect.isawaitable(result):
                 await result
         except Exception:

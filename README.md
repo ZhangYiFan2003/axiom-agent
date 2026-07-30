@@ -29,7 +29,7 @@ The core Agent Runtime paths are covered by offline tests with fake LLM clients.
 | Tool Calling | Merges streamed tool-call deltas, executes registered tools, and replays tool results to the model. | Tested |
 | Built-in Tools | Includes file, shell, search, memory, skill, web, AST lexical/vector code search, static symbol/reference lookup, high-confidence static call graph queries, and snapshot tools. | Partially tested |
 | Graph-Aware Code Context | Assembles search seeds, symbol definitions, references, callers, callees, and bounded call paths into budgeted agent context with reasons. | Tested |
-| Memory | Stores typed conversation, summary, fact/preference, and tool-result digest records with scoped SQLite persistence, Runtime thread history recovery, Map-Reduce summary checkpoints, and budgeted context assembly. | Tested |
+| Memory | Stores typed conversation, summary, fact/preference, and tool-result digest records with scoped SQLite persistence, Runtime thread history recovery, Map-Reduce summary checkpoints, conservative fact/preference extraction, conflict supersession, and budgeted context assembly. | Tested |
 | Snapshots | Creates, restores, lists, and cleans workspace snapshots under an isolated home in tests. | Tested |
 | Skills | Loads built-in, user, and project `SKILL.md` files and supports skill context injection. | Tested |
 | Plan-Execute | Parses task DAGs, runs independent tasks in parallel, respects dependencies, and aggregates results. | Tested |
@@ -186,12 +186,13 @@ Verified in the current baseline:
 - Runtime task store, live localhost Runtime API lifecycle, and stored SSE event replay
 - Runtime thread history recovery from persisted event IDs, explicit fact/preference storage, summary storage interfaces, and bounded tool-result digests
 - Map-Reduce conversation summary checkpoints with source event provenance and deterministic local tests
+- Conservative high-confidence fact/preference extraction with scoped reuse, duplicate merge, conflict supersession, retraction, and deterministic privacy guards
 
 Partially verified or intentionally bounded:
 
 - MCP server long-running stdio/http transport lifecycle remains partially verified.
 - Runtime API public deployment, load testing, distributed queues, real-provider CI, and unlimited live streaming are not verified.
-- Automatic fact extraction, semantic memory retrieval, remote summarization CI, and cross-thread/user preference evaluation are not implemented yet.
+- Semantic memory retrieval, production LLM extraction quality evaluation, remote summarization/extraction CI, and cross-project preference sharing are not implemented yet.
 - Interactive REPL behavior is less extensively covered than non-interactive paths.
 - Real provider streaming has manual smoke coverage plus unit-level streaming/rendering paths, but not exhaustive provider matrix coverage.
 - Not every built-in tool has a full end-to-end test.
@@ -250,7 +251,7 @@ Near-term directions:
 
 - Provider adapter improvements
 - Richer MCP transport lifecycle verification
-- Runtime-integrated Memory v2 follow-up for fact extraction and preference reuse
+- Optional LLM-backed memory extraction evaluation and user-controlled preference management
 - Retrieval evaluation and graph-aware context quality improvements
 - Observability for agent runs, tools, and runtime events
 

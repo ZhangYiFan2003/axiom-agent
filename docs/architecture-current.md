@@ -180,10 +180,14 @@ flowchart TD
 - `src/axiom/memory/service.py`
   - Provides fact/preference, summary, conversation, and tool-result digest
     APIs plus Runtime event to message-history recovery and best-effort
-    conversation summarization.
+    conversation summarization and fact extraction.
 - `src/axiom/memory/context.py`
   - Builds deterministic memory context under character, estimated-token, and
     record budgets, skipping raw conversation covered by active summaries.
+- `src/axiom/memory/facts.py`
+  - Defines fact candidates, the extractor protocol, deterministic local
+    extraction, key normalization, category/scope policy, and privacy
+    validation for conservative fact/preference memory.
 - `src/axiom/memory/summarizer.py`
   - Defines the map/reduce summarizer protocol, deterministic local summarizer,
     segmentation, summary policy, and compression metrics.
@@ -213,6 +217,8 @@ flowchart TD
   - Runs best-effort summary checkpointing after completed turns when the
     configured deterministic threshold is met. Summary failures do not fail the
     completed Runtime turn.
+  - Runs best-effort fact/preference extraction after completed turns. Extracted
+    facts are derived state and never replace raw Runtime events.
 - `src/axiom/runtime/tasks.py`
   - Stores durable background tasks in SQLite.
 
@@ -450,10 +456,10 @@ MCP server expansion points:
 - Runtime API persistence is local SQLite and bound to localhost; it is not a
   distributed service, public deployment validation, load-tested API, or
   distributed queue.
-- Runtime thread history recovery, typed memory, and Map-Reduce summary
-  checkpoints are implemented locally, but automatic fact extraction, semantic
-  memory retrieval, remote summarization CI, and cross-thread/user preference
-  evaluation are not implemented yet.
+- Runtime thread history recovery, typed memory, Map-Reduce summary checkpoints,
+  and conservative scoped fact/preference extraction are implemented locally,
+  but semantic memory retrieval, remote summarization/extraction CI, and
+  production LLM extraction quality evaluation are not implemented yet.
 - Snapshot restore can overwrite workspace files and should be treated as a
   destructive capability.
 - Terminal text in some files appears to contain encoding artifacts, which may

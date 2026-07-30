@@ -158,19 +158,69 @@ class MemoryContextBuilder:
             sections.append(("tool result digests", tools))
         facts: list[MemoryRecord] = []
         scopes = []
+        if thread_id:
+            scopes.append((MemoryScopeType.THREAD, thread_id))
         if project_scope:
             scopes.append((MemoryScopeType.PROJECT, project_scope))
         if user_scope:
             scopes.append((MemoryScopeType.USER, user_scope))
         if scopes:
-            facts = self.store.search_records(
-                query,
-                kinds=[MemoryKind.FACT],
-                scopes=scopes,
-                limit=20,
-            )
+            facts = _collapse_fact_overrides(
+                _rank_facts(
+                    self.store.search_records(
+                        query,
+                        kinds=[MemoryKind.FACT],
+                        scopes=scopes,
+                        limit=50,
+                    )
+                )
+            )[:20]
         sections.insert(2, ("facts and preferences", facts))
         return sections
+
+
+def _rank_facts(records: list[MemoryRecord]) -> list[MemoryRecord]:
+    def key(record: MemoryRecord) -> tuple[int, float, str, str, str]:
+        category = str(record.metadata.get("category") or "")
+        scope_rank = {
+            MemoryScopeType.THREAD: 0,
+            MemoryScopeType.PROJECT: 1,
+            MemoryScopeType.USER: 2,
+        }.get(record.scope_type, 3)
+        category_rank = {
+            "constraint": 0,
+            "project_decision": 1,
+            "workflow": 2,
+            "preference": 3,
+            "environment": 4,
+            "identity-neutral_profile": 5,
+            "fact": 6,
+        }.get(category, 7)
+        try:
+            confidence = float(record.metadata.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        return (
+            scope_rank * 10 + category_rank,
+            -confidence,
+            str(record.metadata.get("key") or ""),
+            record.updated_at,
+            record.id,
+        )
+
+    return sorted(records, key=key)
+
+
+def _collapse_fact_overrides(records: list[MemoryRecord]) -> list[MemoryRecord]:
+    selected: list[MemoryRecord] = []
+    seen_keys: set[str] = set()
+    for record in records:
+        logical_key = str(record.metadata.get("key") or record.id)
+        if logical_key in seen_keys:
+            continue
+        seen_keys.add(logical_key)
+        selected.append(record)
+    return selected
 
 
 def _section(name: str, records: list[MemoryRecord]) -> MemoryContextSection:
@@ -188,9 +238,22 @@ def _serialize_section(name: str, records: list[MemoryRecord]) -> str:
         return ""
     rows = [f"[{name}]"]
     for record in records:
-        prefix = f"- {record.kind.value}:{record.scope_type.value}:{record.scope_id}: "
+        metadata = _metadata_suffix(record)
+        prefix = f"- {record.kind.value}:{record.scope_type.value}:{record.scope_id}{metadata}: "
         rows.append(f"{prefix}{record.content}")
     return "\n".join(rows) + "\n"
+
+
+def _metadata_suffix(record: MemoryRecord) -> str:
+    if record.kind != MemoryKind.FACT:
+        return ""
+    category = record.metadata.get("category")
+    key = record.metadata.get("key")
+    source = ""
+    if record.source_event_start_id is not None:
+        source = f" events={record.source_event_start_id}-{record.source_event_end_id}"
+    parts = [str(item) for item in (category, key) if item]
+    return f" [{' '.join(parts)}{source}]" if parts or source else ""
 
 
 def _drop_oldest_conversation_turn(records: list[MemoryRecord]) -> list[MemoryRecord]:

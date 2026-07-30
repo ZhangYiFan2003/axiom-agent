@@ -9,6 +9,13 @@ from typing import Any
 from axiom.memory.context import MemoryContextBuilder
 from axiom.memory.models import MemoryContextResult, MemoryKind, MemoryRecord, MemoryScopeType
 from axiom.memory.store import MemoryStore
+from axiom.memory.summarizer import (
+    ConversationSummarizer,
+    DeterministicConversationSummarizer,
+    SummaryPolicy,
+    SummaryRunResult,
+    segment_messages,
+)
 from axiom.types import Message
 
 SECRET_PATTERN = re.compile(
@@ -27,11 +34,15 @@ class MemoryService:
         *,
         project_scope: str,
         user_scope: str = "local",
+        summarizer: ConversationSummarizer | None = None,
+        summary_policy: SummaryPolicy | None = None,
     ):
         self.store = MemoryStore(db_path)
         self.project_scope = project_scope
         self.user_scope = user_scope
         self.context_builder = MemoryContextBuilder(self.store)
+        self.summarizer = summarizer or DeterministicConversationSummarizer()
+        self.summary_policy = (summary_policy or SummaryPolicy()).normalized()
 
     def save_fact(
         self,
@@ -78,16 +89,36 @@ class MemoryService:
         source_event_end_id: int | None = None,
         version: int = 1,
         replaces: str | None = None,
+        active: bool = True,
+        summary_stage: str = "reduce",
+        metadata: dict[str, object] | None = None,
     ) -> MemoryRecord:
-        return self.store.save_record(
+        summary_metadata = {
+            "active": active,
+            "version": version,
+            "replaces": replaces,
+            "summary_stage": summary_stage,
+            **dict(metadata or {}),
+        }
+        if active and summary_stage == "reduce":
+            return self.store.save_active_summary(
+                scope_id=thread_id,
+                content=content,
+                source_event_start_id=source_event_start_id,
+                source_event_end_id=source_event_end_id,
+                metadata=summary_metadata,
+                replaces=replaces,
+            )
+        record = self.store.save_record(
             kind=MemoryKind.SUMMARY,
             scope_type=MemoryScopeType.THREAD,
             scope_id=thread_id,
             content=content,
             source_event_start_id=source_event_start_id,
             source_event_end_id=source_event_end_id,
-            metadata={"active": True, "version": version, "replaces": replaces},
+            metadata=summary_metadata,
         )
+        return record
 
     def save_conversation(
         self,
@@ -194,6 +225,125 @@ class MemoryService:
             max_records=max_records,
         )
 
+    async def summarize_thread(self, thread_id: str) -> SummaryRunResult:
+        try:
+            return await self._summarize_thread_unchecked(thread_id)
+        except Exception as exc:  # noqa: BLE001 - summarization is derived state
+            return SummaryRunResult(created=False, error=exc.__class__.__name__)
+
+    async def _summarize_thread_unchecked(self, thread_id: str) -> SummaryRunResult:
+        policy = self.summary_policy
+        if not policy.enabled:
+            return SummaryRunResult(created=False)
+        active_summary = self.store.active_summary(thread_id=thread_id)
+        covered_end = active_summary.source_event_end_id if active_summary else None
+        conversation = self._conversation_records_for_summary(
+            thread_id,
+            after_event_id=covered_end,
+            reserve=policy.recent_message_reserve,
+        )
+        total_conversation = self.store.list_records(
+            kind=MemoryKind.CONVERSATION,
+            scope_type=MemoryScopeType.THREAD,
+            scope_id=thread_id,
+            limit=1000,
+        )
+        if len(total_conversation) < policy.threshold_messages:
+            return SummaryRunResult(created=False)
+        if len(conversation) < policy.minimum_unsummarized_messages:
+            return SummaryRunResult(created=False)
+        conversation = list(reversed(conversation))
+        segments = segment_messages(
+            conversation,
+            max_estimated_tokens=policy.map_chunk_estimated_tokens,
+        )
+        if not segments:
+            return SummaryRunResult(created=False)
+        previous = active_summary.content if active_summary else None
+        partials: list[MemoryRecord] = []
+        for segment in segments:
+            content = await self.summarizer.summarize_map(
+                segment.messages,
+                previous_summary=previous,
+            )
+            partials.append(
+                self.save_summary(
+                    thread_id,
+                    _clip(content, policy.max_summary_chars),
+                    source_event_start_id=segment.source_event_start_id,
+                    source_event_end_id=segment.source_event_end_id,
+                    version=_summary_version(active_summary) + 1,
+                    active=False,
+                    summary_stage="map",
+                    metadata={
+                        "message_count": len(segment.messages),
+                        "summarizer_version": getattr(
+                            self.summarizer,
+                            "version",
+                            self.summarizer.__class__.__name__,
+                        ),
+                    },
+                )
+            )
+        reduce_input = _bounded_reduce_input(
+            [record.content for record in partials],
+            max_estimated_tokens=policy.reduce_input_estimated_tokens,
+        )
+        reduce_text = await self.summarizer.summarize_reduce(
+            reduce_input,
+            previous_summary=previous,
+        )
+        new_start_id = partials[0].source_event_start_id
+        new_end_id = partials[-1].source_event_end_id
+        start_id = (
+            active_summary.source_event_start_id
+            if active_summary is not None and active_summary.source_event_start_id is not None
+            else new_start_id
+        )
+        end_id = new_end_id
+        version = _summary_version(active_summary) + 1
+        summarized_messages = [message for segment in segments for message in segment.messages]
+        summarized_message_count = len(summarized_messages)
+        estimated_before = sum(
+            estimate_text_tokens(str(message.content)) for message in summarized_messages
+        )
+        reduced = _clip(reduce_text, policy.max_summary_chars)
+        estimated_after = estimate_text_tokens(reduced)
+        summary = self.save_summary(
+            thread_id,
+            reduced,
+            source_event_start_id=start_id,
+            source_event_end_id=end_id,
+            version=version,
+            replaces=active_summary.id if active_summary else None,
+            active=True,
+            summary_stage="reduce",
+            metadata={
+                "map_summary_ids": [record.id for record in partials],
+                "message_count": summarized_message_count,
+                "estimated_tokens_before": estimated_before,
+                "estimated_tokens_after": estimated_after,
+                "compression_ratio": _compression_ratio(estimated_before, estimated_after),
+                "summarizer_version": getattr(
+                    self.summarizer,
+                    "version",
+                    self.summarizer.__class__.__name__,
+                ),
+            },
+        )
+        return SummaryRunResult(
+            created=True,
+            summary_id=summary.id,
+            source_event_start_id=start_id,
+            source_event_end_id=end_id,
+            version=version,
+            map_count=len(partials),
+            message_count=summarized_message_count,
+            estimated_tokens_before=estimated_before,
+            estimated_tokens_after=estimated_after,
+            compression_ratio=_compression_ratio(estimated_before, estimated_after),
+        )
+
     def history_from_runtime_events(self, events: Iterable[Any]) -> list[Message]:
         messages: list[Message] = []
         seen_event_ids: set[int] = set()
@@ -228,6 +378,34 @@ class MemoryService:
             return self.project_scope
         return self.project_scope
 
+    def _conversation_records_for_summary(
+        self,
+        thread_id: str,
+        *,
+        after_event_id: int | None,
+        reserve: int,
+    ) -> list[MemoryRecord]:
+        records = self.store.list_records(
+            kind=MemoryKind.CONVERSATION,
+            scope_type=MemoryScopeType.THREAD,
+            scope_id=thread_id,
+            limit=1000,
+        )
+        records = [
+            record
+            for record in records
+            if after_event_id is None
+            or (
+                record.source_event_start_id is not None
+                and record.source_event_start_id > after_event_id
+            )
+        ]
+        if reserve <= 0:
+            return records
+        ordered_oldest_first = list(reversed(records))
+        eligible = ordered_oldest_first[:-reserve] if len(ordered_oldest_first) > reserve else []
+        return list(reversed(eligible))
+
 
 def _bounded_preview(text: str, max_chars: int) -> str:
     limit = max(0, min(max_chars, DEFAULT_TOOL_DIGEST_CHARS))
@@ -240,3 +418,45 @@ def _redact(text: str) -> str:
     redacted = SECRET_PATTERN.sub("[redacted]", text)
     redacted = WINDOWS_PATH_PATTERN.sub("[redacted-path]", redacted)
     return BASE64_BLOB_PATTERN.sub("[redacted-binary]", redacted)
+
+
+def estimate_text_tokens(text: str) -> int:
+    from axiom.memory.context import estimate_tokens
+
+    return estimate_tokens(text)
+
+
+def _summary_version(record: MemoryRecord | None) -> int:
+    if record is None:
+        return 0
+    try:
+        return int(record.metadata.get("version") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _compression_ratio(before: int, after: int) -> float | None:
+    if before <= 0:
+        return None
+    return round(after / before, 4)
+
+
+def _clip(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "\n[truncated]"
+
+
+def _bounded_reduce_input(items: list[str], *, max_estimated_tokens: int) -> list[str]:
+    bounded: list[str] = []
+    total = 0
+    for item in items:
+        tokens = estimate_text_tokens(item)
+        if bounded and total + tokens > max_estimated_tokens:
+            break
+        if tokens > max_estimated_tokens:
+            bounded.append(_clip(item, max_estimated_tokens * 4))
+            break
+        bounded.append(item)
+        total += tokens
+    return bounded

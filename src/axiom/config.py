@@ -63,6 +63,13 @@ class MemoryConfig:
     long_term_db_path: str = "~/.axiom/memory.db"
     token_budget_mode: str = "balanced"
     compression_threshold: float = 0.8
+    summary_threshold_messages: int = 6
+    summary_map_chunk_estimated_tokens: int = 400
+    summary_reduce_input_estimated_tokens: int = 1200
+    summary_minimum_unsummarized_messages: int = 4
+    summary_recent_message_reserve: int = 2
+    summary_max_chars: int = 2000
+    summary_max_attempts: int = 1
 
 
 @dataclass(slots=True)

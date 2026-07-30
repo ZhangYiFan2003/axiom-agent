@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from axiom.config import load_config
+from axiom.memory import MemoryKind, MemoryScopeType, MemoryService, SummaryPolicy
 from axiom.runtime import DurableTaskManager
 from axiom.runtime.api import RuntimeApiServer, RuntimeTurnContext
 
@@ -217,6 +218,17 @@ class FailingMemoryService:
 
     def save_tool_result(self, *_args, **_kwargs):
         raise RuntimeError("memory unavailable")
+
+
+class FailingSummaryMemoryService(FailingMemoryService):
+    def save_conversation(self, *_args, **_kwargs):
+        return None
+
+    def save_tool_result(self, *_args, **_kwargs):
+        return None
+
+    async def summarize_thread(self, _thread_id: str):
+        raise RuntimeError("summary unavailable")
 
 
 def _headers(kind: str = "x-api-key") -> dict[str, str]:
@@ -502,6 +514,63 @@ def test_runtime_memory_derivation_failure_does_not_fail_turn(tmp_path):
     assert {"user.message", "assistant.message", "tool_result"} <= {
         event.type for event in server.repository.list_events(thread_id)
     }
+
+
+def test_runtime_summary_failure_does_not_fail_completed_turn(tmp_path):
+    server = RuntimeApiServer(
+        cwd=str(tmp_path),
+        config=load_config(project_root=tmp_path),
+        **_api_key_arg(),
+        port=0,
+        workers=0,
+        data_dir=tmp_path / "runtime-data",
+        engine_factory=_fake_engine_factory([]),
+        memory_service=FailingSummaryMemoryService(),
+    )
+    thread_id = server.repository.create_thread()
+
+    result = asyncio.run(server._run_turn(thread_id, "hello"))
+
+    assert result == {"thread_id": thread_id, "text": "fake response"}
+    assert "turn.completed" in [event.type for event in server.repository.list_events(thread_id)]
+
+
+def test_runtime_turn_completion_creates_summary_checkpoint(tmp_path):
+    service = MemoryService(
+        tmp_path / "runtime-data" / "memory.db",
+        project_scope=str(tmp_path),
+        summary_policy=SummaryPolicy(
+            threshold_messages=6,
+            minimum_unsummarized_messages=4,
+            recent_message_reserve=2,
+        ),
+    )
+    server = RuntimeApiServer(
+        cwd=str(tmp_path),
+        config=load_config(project_root=tmp_path),
+        **_api_key_arg(),
+        port=0,
+        workers=0,
+        data_dir=tmp_path / "runtime-data",
+        engine_factory=_fake_engine_factory([]),
+        memory_service=service,
+    )
+    thread_id = server.repository.create_thread()
+
+    for index in range(4):
+        asyncio.run(server._run_turn(thread_id, f"message {index}"))
+
+    active = service.store.active_summary(thread_id=thread_id)
+    summaries = service.list_records(
+        kind=MemoryKind.SUMMARY,
+        scope_type=MemoryScopeType.THREAD,
+        scope_id=thread_id,
+        include_inactive=True,
+    )
+
+    assert active is not None
+    assert active.source_event_end_id is not None
+    assert any(record.metadata.get("summary_stage") == "map" for record in summaries)
 
 
 def test_runtime_rejects_concurrent_turn_on_same_thread(tmp_path):

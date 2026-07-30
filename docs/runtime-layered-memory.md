@@ -36,23 +36,23 @@ Conversation memory is derived after each source event is persisted. Derivation
 is best-effort: if a typed memory write fails, the Runtime turn still uses the
 thread event log as the source of truth and can rebuild derived memory later.
 
-The Runtime API still does not reconstruct a full long-term memory prompt by
-itself. The recovered history boundary is provided so later stages can add
-summary generation and richer memory selection.
+The Runtime API also supports Map-Reduce conversation summary checkpoints. The
+summary is derived state; raw events remain the source of truth.
 
 ## Context budgets
 
 `MemoryContextBuilder` assembles deterministic local context sections:
 
-1. latest summary
-2. recent conversation
+1. active summary
+2. recent unsummarized conversation
 3. explicit facts and preferences
 4. tool-result digests
 
 The builder enforces hard character, estimated-token, and record limits. Token
 counts use a documented local heuristic and are not provider billing tokens.
 
-When context is over budget, the builder evicts deterministically. Older
+When context is over budget, the builder evicts deterministically. Raw
+conversation records covered by the active summary are skipped, older
 conversation turns are removed before newer turns, summaries are preferred when
 they fit, and bounded tool digests are lower priority than explicit facts.
 
@@ -90,8 +90,6 @@ distributed cross-process thread lock.
 
 This foundation intentionally does not implement:
 
-- automatic LLM summarization
-- Map-Reduce compression
 - automatic fact extraction
 - semantic or vector memory retrieval
 - cloud or distributed memory

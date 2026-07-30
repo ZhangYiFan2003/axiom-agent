@@ -49,3 +49,11 @@ class MemoryContextResult:
     truncated: bool
     evicted_count: int
     included_count: int
+    summary_used: bool = False
+    summary_source_start_id: int | None = None
+    summary_source_end_id: int | None = None
+    raw_messages_included: int = 0
+    raw_messages_skipped_by_summary: int = 0
+    estimated_tokens_before_compression: int = 0
+    estimated_tokens_after_compression: int = 0
+    compression_ratio: float | None = None

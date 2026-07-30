@@ -47,7 +47,7 @@ stage. This document does not repeat the model request.
 | Multi-agent | `src/axiom/agent/orchestrator.py` | Verified | `tests/test_multi_agent.py` verifies plan parsing, independent worker parallelism, dependent worker ordering, result collection, reviewer reject-then-approve retry, and worker failure summaries with fake LLM clients. |
 | MCP client | `src/axiom/mcp/client.py`, `src/axiom/mcp/config.py` | Verified | Tests passed for stdio MCP tool discovery/call and stderr suppression. |
 | MCP server | `src/axiom/mcp/server.py` | Partially verified | Handler-level tests cover initialize, tools/list, safe tools/call, unknown tools, unknown methods, and malformed missing-method requests. Long-running stdio/http transports were not started in this baseline. |
-| Runtime API | `src/axiom/runtime/api.py`, `src/axiom/runtime/tasks.py` | Partially verified | Durable task tests and direct handler tests cover authorization, task create/get/complete/cancel, unknown IDs, malformed JSON, missing fields, and unsupported routes. Live HTTP serving and LLM-backed thread turns were not started in this baseline. |
+| Runtime API | `src/axiom/runtime/api.py`, `src/axiom/runtime/tasks.py` | Verified | Durable task tests, direct handler tests, and live localhost HTTP tests cover server start/shutdown, port `0`, health, auth, task create/list/get/cancel, fake thread turns, stored SSE event replay with `after_id`, isolated `data_dir`, restart persistence, and socket release. |
 
 Status definitions:
 
@@ -76,7 +76,7 @@ secrets and external services unless explicitly noted.
 | Plan-execute | Run existing `tests/test_plan.py` | None expected | Temp files plus snapshot state |
 | Multi-agent | Run existing `tests/test_multi_agent.py` | None expected | Temp files plus snapshot state |
 | MCP client/server handler | Run existing `tests/test_mcp.py` | None expected | Temp MCP server files |
-| Runtime task/API handler | Run existing `tests/test_runtime.py` | None expected | Temp SQLite files under isolated home |
+| Runtime task/API live localhost | Run existing `tests/test_runtime.py` | Localhost only | Temp SQLite files under isolated `data_dir` |
 
 ## 4. Test baseline
 
@@ -117,10 +117,10 @@ uv run pytest
 
 Result:
 
-- Passed: 104
+- Passed: 110
 - Failed: 0
 - Skipped: 0
-- Total executed: 104
+- Total executed: 110
 
 The pytest baseline is currently green after test home-directory isolation was
 added for Windows.
@@ -130,15 +130,16 @@ added for Windows.
 - The one-shot prompt path can call a paid provider when API configuration is
   present. It should not be included in default local test runs.
 - Interactive REPL behavior is less extensively covered than non-interactive paths, though code context slash-command dispatch is now covered without launching a terminal.
-- Runtime API live HTTP serving and LLM-backed thread turns are not covered by the current automated baseline.
+- Runtime API public deployment, load testing, distributed queues, real-provider CI, and unlimited live streaming are not covered by the current automated baseline.
+- Runtime thread events are persisted, but thread history recovery, four-layer Memory v2, Map-Reduce compression, and cross-thread/user preference memory are not implemented yet.
 - MCP long-running stdio/http server behavior is only partially covered through
   request handler and client tests.
 - Broader end-to-end coverage for every built-in tool is still incomplete, though code search, symbol, call graph, and graph-aware context tools now have deterministic fixture coverage.
 
 ## 6. Recommended next-stage tasks
 
-1. Add a Runtime API live HTTP smoke test on localhost with an ephemeral port, if server lifecycle hooks are made test-friendly.
+1. Add Runtime-integrated Memory v2 using persisted thread events as the raw conversation source of truth.
 2. Add structured Agent run observability for ReAct, tool execution, Plan-and-Execute, and multi-agent workflows.
 3. Add MCP stdio/http transport lifecycle tests with deterministic process cleanup.
-4. Broaden no-network tests for high-risk built-in tools beyond the current read/write, code search, and ReAct `read_file` paths.
+4. Broaden no-network tests for high-risk built-in tools beyond the current read/write, code search, Runtime API, and ReAct `read_file` paths.
 5. Keep paid model verification as an explicit manual smoke command, never as a default automated test.

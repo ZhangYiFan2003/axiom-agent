@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import socket
 from io import BytesIO
 from typing import Any
 
+import httpx
+import pytest
+
 from axiom.config import load_config
 from axiom.runtime import DurableTaskManager
-from axiom.runtime.api import RuntimeApiServer
+from axiom.runtime.api import RuntimeApiServer, RuntimeTurnContext
 
 
 def test_durable_task_lifecycle(tmp_path):
@@ -83,7 +87,14 @@ class FakeHttpRequest:
 
 def _runtime_server(tmp_path) -> RuntimeApiServer:
     config = load_config(project_root=tmp_path)
-    return RuntimeApiServer(cwd=str(tmp_path), config=config, api_key="test-api-key", port=0)
+    return RuntimeApiServer(
+        cwd=str(tmp_path),
+        config=config,
+        api_key="test-api-key",
+        port=0,
+        data_dir=tmp_path / "runtime-data",
+        workers=0,
+    )
 
 
 def _handle(server: RuntimeApiServer, request: FakeHttpRequest) -> tuple[int, dict[str, Any]]:
@@ -163,3 +174,288 @@ def test_runtime_api_handles_invalid_and_malformed_requests_without_internal_lea
         assert "Traceback" not in body
         assert ".py" not in body
         assert "test-api-key" not in body
+
+
+class FakeEngine:
+    def __init__(self, text: str = "fake response"):
+        self.text = text
+
+    async def ask(self, message: str):
+        yield {"type": "text_delta", "text": self.text}
+        yield {"type": "tool_call", "name": "fake_tool", "arguments_chars": len(message)}
+        yield {"type": "tool_result", "name": "fake_tool", "content_chars": 2}
+        yield {"type": "done", "stop_reason": "stop"}
+
+    async def ask_complete_async(self, _prompt: str):
+        class Result:
+            text = "task response"
+
+        return Result()
+
+
+def _fake_engine_factory(contexts: list[RuntimeTurnContext]):
+    def factory(context: RuntimeTurnContext) -> FakeEngine:
+        contexts.append(context)
+        return FakeEngine()
+
+    return factory
+
+
+def _headers(kind: str = "x-api-key") -> dict[str, str]:
+    if kind == "bearer":
+        return {"authorization": "Bearer test-api-key"}
+    return {"x-api-key": "test-api-key"}
+
+
+def _sse_events(body: str) -> list[dict[str, Any]]:
+    events = []
+    for block in body.strip().split("\n\n"):
+        if not block:
+            continue
+        item: dict[str, Any] = {}
+        for line in block.splitlines():
+            name, _, value = line.partition(": ")
+            item[name] = value
+        if "data" in item:
+            item["data"] = json.loads(str(item["data"]))
+        if "id" in item:
+            item["id"] = int(item["id"])
+        events.append(item)
+    return events
+
+
+def test_runtime_api_live_http_lifecycle_auth_threads_events_and_tasks(tmp_path):
+    contexts: list[RuntimeTurnContext] = []
+    data_dir = tmp_path / "runtime-data"
+    server = RuntimeApiServer(
+        cwd=str(tmp_path),
+        config=load_config(project_root=tmp_path),
+        api_key="test-api-key",
+        port=0,
+        workers=0,
+        data_dir=data_dir,
+        engine_factory=_fake_engine_factory(contexts),
+    )
+
+    with server.running() as running:
+        host, port = running.address
+        base_url = f"http://{host}:{port}"
+        with httpx.Client(base_url=base_url, timeout=5.0) as client:
+            health = client.get("/health")
+            assert health.status_code == 200
+            assert health.json() == {"status": "ok", "workers": 0, "database": "ok"}
+
+            assert client.get("/v1/tasks").status_code == 401
+            assert client.get("/v1/tasks", headers={"x-api-key": "wrong"}).status_code == 401
+            assert client.get("/v1/tasks", headers=_headers("bearer")).status_code == 200
+
+            created_thread = client.post("/v1/threads", headers=_headers()).json()
+            thread_id = created_thread["id"]
+
+            turn = client.post(
+                f"/v1/threads/{thread_id}/turns",
+                headers=_headers("bearer"),
+                json={"message": "hello runtime"},
+            )
+            assert turn.status_code == 200
+            assert turn.json() == {"thread_id": thread_id, "text": "fake response"}
+
+            replay = client.get(f"/v1/threads/{thread_id}/events", headers=_headers())
+            assert replay.status_code == 200
+            assert replay.headers["content-type"].startswith("text/event-stream")
+            events = _sse_events(replay.text)
+            ids = [event["id"] for event in events]
+            assert ids == sorted(ids)
+            assert len(ids) == len(set(ids))
+            assert {"thread.created", "turn.started", "user.message", "assistant.message"} <= {
+                event["event"] for event in events
+            }
+            assert {"tool_call", "tool_result", "turn.completed"} <= {
+                event["event"] for event in events
+            }
+
+            cursor = ids[2]
+            after = client.get(
+                f"/v1/threads/{thread_id}/events?after_id={cursor}",
+                headers=_headers(),
+            )
+            assert after.status_code == 200
+            assert all(event["id"] > cursor for event in _sse_events(after.text))
+
+            non_numeric = client.get(
+                f"/v1/threads/{thread_id}/events?after_id=not-a-number",
+                headers=_headers(),
+            )
+            negative = client.get(
+                f"/v1/threads/{thread_id}/events?after_id=-1",
+                headers=_headers(),
+            )
+            assert [event["id"] for event in _sse_events(non_numeric.text)] == ids
+            assert [event["id"] for event in _sse_events(negative.text)] == ids
+
+            missing_events = client.get("/v1/threads/thread_missing/events", headers=_headers())
+            assert missing_events.status_code == 404
+            assert missing_events.json() == {"error": "thread not found"}
+
+            task = client.post("/v1/tasks", headers=_headers(), json={"message": "do work"})
+            assert task.status_code == 200
+            task_id = task.json()["id"]
+            listed = client.get("/v1/tasks", headers=_headers()).json()["tasks"]
+            assert any(item["id"] == task_id for item in listed)
+            fetched = client.get(f"/v1/tasks/{task_id}", headers=_headers())
+            assert fetched.status_code == 200
+            assert fetched.json()["status"] == "queued"
+            canceled = client.post(f"/v1/tasks/{task_id}/cancel", headers=_headers())
+            assert canceled.status_code == 200
+            assert canceled.json() == {"canceled": True}
+
+            malformed = client.post("/v1/tasks", headers=_headers(), content=b"{")
+            assert malformed.status_code == 400
+            missing_field = client.post("/v1/tasks", headers=_headers(), json={})
+            assert missing_field.status_code == 400
+            unknown = client.get("/v1/unknown", headers=_headers())
+            assert unknown.status_code == 404
+
+    assert contexts
+    assert contexts[0].thread_id == thread_id
+    assert contexts[0].message == "hello runtime"
+    assert contexts[0].history
+    assert (data_dir / "runtime.db").exists()
+    assert (data_dir / "tasks.db").exists()
+    assert not (tmp_path / "home" / ".axiom").exists()
+    assert server._server_thread is None
+    assert server._worker_threads == []
+
+    second = RuntimeApiServer(
+        cwd=str(tmp_path),
+        config=load_config(project_root=tmp_path),
+        api_key="test-api-key",
+        port=port,
+        workers=0,
+        data_dir=tmp_path / "second-data",
+        engine_factory=_fake_engine_factory([]),
+    )
+    with second.running() as restarted:
+        assert restarted.address[1] == port
+
+
+def test_runtime_events_repository_persists_after_server_restart(tmp_path):
+    data_dir = tmp_path / "runtime-data"
+    first = RuntimeApiServer(
+        cwd=str(tmp_path),
+        config=load_config(project_root=tmp_path),
+        api_key="test-api-key",
+        port=0,
+        workers=0,
+        data_dir=data_dir,
+        engine_factory=_fake_engine_factory([]),
+    )
+    thread_id = first.repository.create_thread()
+    first.repository.append_event(thread_id, "user.message", {"text": "persist me"})
+
+    second = RuntimeApiServer(
+        cwd=str(tmp_path),
+        config=load_config(project_root=tmp_path),
+        api_key="test-api-key",
+        port=0,
+        workers=0,
+        data_dir=data_dir,
+        engine_factory=_fake_engine_factory([]),
+    )
+    events = second.repository.list_events(thread_id)
+
+    assert [event.type for event in events] == ["thread.created", "user.message"]
+    assert events[0].id < events[1].id
+
+
+def test_runtime_tasks_persist_after_server_restart(tmp_path):
+    data_dir = tmp_path / "runtime-data"
+    first = RuntimeApiServer(
+        cwd=str(tmp_path),
+        config=load_config(project_root=tmp_path),
+        api_key="test-api-key",
+        port=0,
+        workers=0,
+        data_dir=data_dir,
+        engine_factory=_fake_engine_factory([]),
+    )
+    task_id = first.task_manager.add("persist task")
+    first.task_manager.cancel(task_id)
+
+    second = RuntimeApiServer(
+        cwd=str(tmp_path),
+        config=load_config(project_root=tmp_path),
+        api_key="test-api-key",
+        port=0,
+        workers=0,
+        data_dir=data_dir,
+        engine_factory=_fake_engine_factory([]),
+    )
+    restored = second.task_manager.get(task_id)
+
+    assert restored is not None
+    assert restored.status == "canceled"
+
+
+def test_runtime_shutdown_is_idempotent_when_not_started_or_already_closed(tmp_path):
+    server = RuntimeApiServer(
+        cwd=str(tmp_path),
+        config=load_config(project_root=tmp_path),
+        api_key="test-api-key",
+        port=0,
+        workers=1,
+        data_dir=tmp_path / "runtime-data",
+        engine_factory=_fake_engine_factory([]),
+    )
+
+    server.shutdown()
+    server.start()
+    assert server._worker_threads
+    server.shutdown()
+    server.shutdown()
+
+    assert server._httpd is None
+    assert server._server_thread is None
+    assert server._worker_threads == []
+
+
+def test_runtime_running_context_closes_after_exception(tmp_path):
+    server = RuntimeApiServer(
+        cwd=str(tmp_path),
+        config=load_config(project_root=tmp_path),
+        api_key="test-api-key",
+        port=0,
+        workers=1,
+        data_dir=tmp_path / "runtime-data",
+        engine_factory=_fake_engine_factory([]),
+    )
+
+    with pytest.raises(RuntimeError), server.running() as running:
+        host, port = running.address
+        assert port > 0
+        raise RuntimeError("boom")
+
+    assert server._httpd is None
+    assert server._server_thread is None
+    assert server._worker_threads == []
+    with pytest.raises(OSError):
+        socket.create_connection((host, port), timeout=0.25)
+
+
+def test_runtime_live_server_releases_socket_after_shutdown(tmp_path):
+    server = RuntimeApiServer(
+        cwd=str(tmp_path),
+        config=load_config(project_root=tmp_path),
+        api_key="test-api-key",
+        port=0,
+        workers=0,
+        data_dir=tmp_path / "runtime-data",
+        engine_factory=_fake_engine_factory([]),
+    )
+    server.start()
+    host, port = server.address
+    server.shutdown()
+    server.shutdown()
+
+    with pytest.raises(OSError):
+        socket.create_connection((host, port), timeout=0.25)

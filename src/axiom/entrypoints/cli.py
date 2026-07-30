@@ -106,6 +106,10 @@ def runtime_serve(
         typer.Option("--api-key", help="Runtime API key. Defaults to AXIOM_RUNTIME_API_KEY."),
     ] = None,
     cwd: Annotated[Path | None, typer.Option("--cwd", help="Working directory")] = None,
+    data_dir: Annotated[
+        Path | None,
+        typer.Option("--data-dir", help="Runtime data directory"),
+    ] = None,
 ) -> None:
     _ = http
     root = (cwd or Path.cwd()).resolve()
@@ -115,7 +119,13 @@ def runtime_serve(
     except ValueError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc
-    RuntimeApiServer(cwd=str(root), config=config, api_key=key, port=port).serve_forever()
+    RuntimeApiServer(
+        cwd=str(root),
+        config=config,
+        api_key=key,
+        port=port,
+        data_dir=data_dir,
+    ).serve_forever()
 
 
 @mcp_app.command("serve")
